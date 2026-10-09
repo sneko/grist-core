@@ -15,6 +15,7 @@ import { makeT } from "app/client/lib/localization";
 import { reportError } from "app/client/models/AppModel";
 import { DataRowModel } from "app/client/models/DataRowModel";
 import { ColumnRec, DocModel, ViewFieldRec } from "app/client/models/DocModel";
+import { reportWarning } from "app/client/models/errors";
 import { type KoReactive, SaveableObjObservable, setSaveValue } from "app/client/models/modelUtil";
 import { FieldSettingsMenu } from "app/client/ui/FieldMenus";
 import { translateColumnTypeLabel } from "app/client/ui/GridViewMenus";
@@ -33,6 +34,7 @@ import { NewAbstractWidget } from "app/client/widgets/NewAbstractWidget";
 import { IEditorConstructor } from "app/client/widgets/NewBaseEditor";
 import * as UserType from "app/client/widgets/UserType";
 import * as UserTypeImpl from "app/client/widgets/UserTypeImpl";
+import { isLockedCell } from "app/common/encryption/LockedCell";
 import { getReferencedTableId, isFullReferencingType } from "app/common/gristTypes";
 import * as gristTypes from "app/common/gristTypes";
 import { CombinedStyle, Style } from "app/common/Styles";
@@ -785,6 +787,11 @@ export class FieldBuilder extends Disposable {
     const cell = editRow.cells[this.field.colId()];
     const value = cell && cell();
     if (gristTypes.isCensored(value) && !this.origColumn.isFormula.peek()) {
+      return clearOwn();
+    }
+    // Private values of encrypted documents can't be edited by members who can't read them.
+    if (isLockedCell(value)) {
+      reportWarning(t("You don't have access to this private column"), { key: "locked-cell" });
       return clearOwn();
     }
 

@@ -2,13 +2,15 @@ import { ActionGroup } from "app/common/ActionGroup";
 import { VisibleUserProfile } from "app/common/ActiveDocAPI";
 import { DocAction } from "app/common/DocActions";
 import { FilteredDocUsageSummary } from "app/common/DocUsage";
+import { EncryptedActionMessage, EncryptedKeysMessage } from "app/common/encryption/EncryptionTypes";
 import { Product } from "app/common/Features";
 import { StringUnion } from "app/common/StringUnion";
 import { AttachmentTransferStatus } from "app/common/UserAPI";
 
 export const ValidEvent = StringUnion(
   "docListAction", "docUserAction", "docShutdown", "docError",
-  "docUsage", "docChatter", "docUserPresenceUpdate", "clientConnect");
+  "docUsage", "docChatter", "docUserPresenceUpdate", "clientConnect",
+  "encryptedDocAction", "encryptedDocKeys");
 export type ValidEvent = typeof ValidEvent.type;
 
 /**
@@ -54,11 +56,29 @@ export interface CommMessageBase {
 
 export type CommDocMessage = CommDocUserAction | CommDocUsage | CommDocShutdown |
   CommDocError | CommDocChatter | CommDocUserPresenceUpdate;
-export type CommMessage = CommDocMessage | CommDocListAction | CommClientConnect;
+export type CommMessage = CommDocMessage | CommDocListAction | CommClientConnect | CommEncryptionMessage;
 
 export type CommResponseBase = CommResponse | CommResponseError | CommMessage;
 
 export type CommDocEventType = CommDocMessage["type"];
+
+/**
+ * Events for end-to-end encrypted documents, which browsers open through openEncryptedDoc rather than
+ * openDoc (see app/server/lib/encryption/EncryptionRelay.ts). They are identified by docId, not docFD.
+ */
+export type CommEncryptionMessage = CommEncryptedDocAction | CommEncryptedDocKeys;
+
+/** A change to an encrypted document, made by another browser. */
+export interface CommEncryptedDocAction extends CommMessageBase {
+  type: "encryptedDocAction";
+  data: EncryptedActionMessage;
+}
+
+/** Copies of an encrypted document's key were added. */
+export interface CommEncryptedDocKeys extends CommMessageBase {
+  type: "encryptedDocKeys";
+  data: EncryptedKeysMessage;
+}
 
 /**
  * Event for a change to the document list.

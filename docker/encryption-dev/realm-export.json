@@ -1,0 +1,138 @@
+{
+  "realm": "grist",
+  "enabled": true,
+  "displayName": "Grist (encryption dev)",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "accessTokenLifespan": 300,
+  "clients": [
+    {
+      "clientId": "grist",
+      "name": "Grist",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "grist-dev-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "rootUrl": "http://localhost:8484",
+      "baseUrl": "http://localhost:8484/",
+      "redirectUris": [
+        "http://localhost:8484/oauth2/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:8484"
+      ],
+      "frontchannelLogout": true,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8484/*"
+      },
+      "defaultClientScopes": [
+        "web-origins",
+        "basic",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "offline_access"
+      ]
+    },
+    {
+      "clientId": "encryption",
+      "name": "Encryption",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "http://encryption.localhost:7200/auth/callback"
+      ],
+      "webOrigins": [
+        "http://encryption.localhost:7200"
+      ],
+      "frontchannelLogout": true,
+      "attributes": {},
+      "protocolMappers": [
+        {
+          "name": "subject",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "consentRequired": false,
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
+      "defaultClientScopes": [
+        "web-origins",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "optionalClientScopes": []
+    }
+  ],
+  "users": [
+    {
+      "id": "a11ce000-0000-4000-8000-000000000001",
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Martin",
+      "email": "alice@example.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password",
+          "temporary": false
+        }
+      ],
+      "requiredActions": []
+    },
+    {
+      "id": "b0b00000-0000-4000-8000-000000000002",
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Durand",
+      "email": "bob@example.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password",
+          "temporary": false
+        }
+      ],
+      "requiredActions": []
+    },
+    {
+      "id": "ca201000-0000-4000-8000-000000000003",
+      "username": "carol",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Petit",
+      "email": "carol@example.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password",
+          "temporary": false
+        }
+      ],
+      "requiredActions": []
+    }
+  ]
+}

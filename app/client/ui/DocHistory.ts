@@ -9,6 +9,7 @@ import { buttonSelect } from "app/client/ui2018/buttonSelect";
 import { testId, theme, vars } from "app/client/ui2018/cssVars";
 import { icon } from "app/client/ui2018/icons";
 import { menu, menuItemLink } from "app/client/ui2018/menus";
+import { isEncryptedDoc } from "app/common/encryption/EncryptionTypes";
 import { buildUrlId, parseUrlId } from "app/common/gristUrls";
 import { StringUnion } from "app/common/StringUnion";
 import { DocSnapshot } from "app/common/UserAPI";
@@ -28,6 +29,11 @@ export class DocHistory extends Disposable implements IDomComponent {
   }
 
   public buildDom() {
+    // Snapshots of end-to-end encrypted documents are encrypted: the server can't list them as
+    // documents. Only the activity applies.
+    if (isEncryptedDoc(this._docPageModel.currentDoc.get())) {
+      return buildConfigContainer(this._actionLog.buildDom());
+    }
     const tabs = [
       { value: "activity", label: t("Activity") },
       { value: "snapshots", label: t("Snapshots") },

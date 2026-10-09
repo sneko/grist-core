@@ -39,6 +39,7 @@ import { menu, menuItem, menuText } from "app/client/ui2018/menus";
 import { confirmModal, cssAnimatedModal, cssModalBody, cssModalButtons, cssModalTitle,
   IModalControl, modal } from "app/client/ui2018/modals";
 import { normalizeEmail } from "app/common/emails";
+import { isEncryptedDoc } from "app/common/encryption/EncryptionTypes";
 import { commonUrls, isOrgInPathOnly } from "app/common/gristUrls";
 import { capitalizeFirstWord, isAffirmative, isLongerThan } from "app/common/gutil";
 import { FullUser } from "app/common/LoginSessionAPI";
@@ -329,35 +330,37 @@ export class UserManager extends Disposable {
           dom("span", t("Inherit access: ")),
           this._inheritRoleSelector(),
         ),
-        publicMember ? dom("span", { style: `float: right;` },
-          cssSmallPublicMemberIcon("PublicFilled"),
-          dom("span", t("Public access: ")),
-          cssOptionBtn(
-            menu(() => {
-              tooltipControl?.close();
-              return [
-                menuItem(() => publicMember.access.set(roles.VIEWER), t("On"), testId(`um-public-option`)),
-                menuItem(() => publicMember.access.set(null), t("Off"),
+        // Encrypted documents must remain restricted to their members (who hold their key).
+        (publicMember && !isEncryptedDoc(this._options.resource as Parameters<typeof isEncryptedDoc>[0])) ?
+          dom("span", { style: `float: right;` },
+            cssSmallPublicMemberIcon("PublicFilled"),
+            dom("span", t("Public access: ")),
+            cssOptionBtn(
+              menu(() => {
+                tooltipControl?.close();
+                return [
+                  menuItem(() => publicMember.access.set(roles.VIEWER), t("On"), testId(`um-public-option`)),
+                  menuItem(() => publicMember.access.set(null), t("Off"),
                   // Disable null access if anonymous access is inherited.
-                  dom.cls("disabled", use => use(publicMember.inheritedAccess) !== null),
-                  testId(`um-public-option`),
-                ),
-                // If the 'Off' setting is disabled, show an explanation.
-                dom.maybe(use => use(publicMember.inheritedAccess) !== null, () => menuText(
-                  t(`Public access inherited from {{parent}}. To remove, set 'Inherit access' option to 'None'.`,
-                    { parent: getResourceParent(this._model.resourceType) },
-                  ))),
-              ];
+                    dom.cls("disabled", use => use(publicMember.inheritedAccess) !== null),
+                    testId(`um-public-option`),
+                  ),
+                  // If the 'Off' setting is disabled, show an explanation.
+                  dom.maybe(use => use(publicMember.inheritedAccess) !== null, () => menuText(
+                    t(`Public access inherited from {{parent}}. To remove, set 'Inherit access' option to 'None'.`,
+                      { parent: getResourceParent(this._model.resourceType) },
+                    ))),
+                ];
+              }),
+              dom.text(use => use(publicMember.effectiveAccess) ? t("On") : t("Off")),
+              cssCollapseIcon("Collapse"),
+              testId("um-public-access"),
+            ),
+            hoverTooltip((ctl) => {
+              tooltipControl = ctl;
+              return t("Allow anyone with the link to open.");
             }),
-            dom.text(use => use(publicMember.effectiveAccess) ? t("On") : t("Off")),
-            cssCollapseIcon("Collapse"),
-            testId("um-public-access"),
-          ),
-          hoverTooltip((ctl) => {
-            tooltipControl = ctl;
-            return t("Allow anyone with the link to open.");
-          }),
-        ) : null,
+          ) : null,
       ),
     );
   }

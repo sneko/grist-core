@@ -151,6 +151,7 @@ export function docBreadcrumbs(
     isAnonymous?: boolean,
     isProposable?: Observable<boolean>,
     isReadonly?: Observable<boolean>,
+    isEncrypted?: boolean,
   },
 ): Element {
   const shouldShowWorkspace = !(options.isTemplate && options.isAnonymous);
@@ -190,6 +191,11 @@ export function docBreadcrumbs(
       ],
     }),
     dom.maybe(options.isPublic, () => cssPublicIcon("PublicFilled", testId("bc-is-public"))),
+    options.isEncrypted ? cssTag(icon("Lock"), " ", t("encrypted"),
+      tooltip({ title: t("End-to-end encrypted: only members holding its key can read this document, " +
+        "the server can't.") }),
+      testId("encrypted-tag"),
+    ) : null,
     dom.domComputed((use) => {
       if (options.isSnapshot && use(options.isSnapshot)) {
         return cssTag(t("snapshot"), testId("snapshot-tag"));

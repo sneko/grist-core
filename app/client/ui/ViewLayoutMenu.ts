@@ -1,11 +1,13 @@
 import { allCommands } from "app/client/components/commands";
 import { GristDoc } from "app/client/components/GristDoc";
+import { downloadActiveSection } from "app/client/encryption/localExport";
 import { hooks } from "app/client/Hooks";
 import { makeT } from "app/client/lib/localization";
 import { ViewSectionRec } from "app/client/models/DocModel";
 import { urlState } from "app/client/models/gristUrlState";
 import { testId } from "app/client/ui2018/cssVars";
-import { menuDivider, menuItemCmd, menuItemLink } from "app/client/ui2018/menus";
+import { menuDivider, menuItem, menuItemCmd, menuItemLink } from "app/client/ui2018/menus";
+import { isEncryptedDoc } from "app/common/encryption/EncryptionTypes";
 import { WidgetType } from "app/common/widgetTypes";
 
 import { dom, UseCB } from "grainjs";
@@ -69,8 +71,9 @@ export function makeViewLayoutMenu(viewSection: ViewSectionRec, isReadonly: bool
   };
 
   const isCard = (use: UseCB) => use(viewSection.widgetType) === WidgetType.Card;
+  // (Forms take submissions through the server, which can't write to encrypted documents.)
   const showCreateForm = (use: UseCB) => use(viewSection.widgetType) === WidgetType.Table &&
-    Boolean(viewRec.getRowId()) && !isReadonly;
+    Boolean(viewRec.getRowId()) && !isReadonly && !isEncryptedDoc(gristDoc.docPageModel.currentDoc.get());
 
   return [
     dom.maybe(isCard, () => contextMenu),
@@ -85,10 +88,16 @@ export function makeViewLayoutMenu(viewSection: ViewSectionRec, isReadonly: bool
       ),
     ),
     menuItemCmd(allCommands.printSection, t("Print widget"), testId("print-section")),
-    menuItemLink(hooks.maybeModifyLinkAttrs({ href: gristDoc.getCsvLink(), target: "_blank", download: "" }),
-      t("Download as CSV"), testId("download-section")),
-    menuItemLink(hooks.maybeModifyLinkAttrs({ href: gristDoc.getXlsxActiveViewLink(), target: "_blank", download: "" }),
-      t("Download as XLSX"), testId("download-section")),
+    // End-to-end encrypted documents are exported by the browser (the server can't read them).
+    isEncryptedDoc(gristDoc.docPageModel.currentDoc.get()) ? [
+      menuItem(() => downloadActiveSection(gristDoc, "csv"), t("Download as CSV"), testId("download-section")),
+    ] : [
+      menuItemLink(hooks.maybeModifyLinkAttrs({ href: gristDoc.getCsvLink(), target: "_blank", download: "" }),
+        t("Download as CSV"), testId("download-section")),
+      menuItemLink(
+        hooks.maybeModifyLinkAttrs({ href: gristDoc.getXlsxActiveViewLink(), target: "_blank", download: "" }),
+        t("Download as XLSX"), testId("download-section")),
+    ],
     dom.maybe(use => ["detail", "single"].includes(use(viewSection.parentKey)), () =>
       menuItemCmd(allCommands.editLayout, t("Edit card layout"),
         dom.cls("disabled", isReadonly))),

@@ -18,6 +18,7 @@ import { theme, vars } from "app/client/ui2018/cssVars";
 import { icon } from "app/client/ui2018/icons";
 import { spinnerModal } from "app/client/ui2018/modals";
 import { unstyledButton } from "app/client/ui2018/unstyled";
+import { isEncryptedDoc } from "app/common/encryption/EncryptionTypes";
 import { isLongerThan, nativeCompare } from "app/common/gutil";
 import { IWidgetType } from "app/common/widgetTypes";
 
@@ -432,7 +433,9 @@ export class PageWidgetSelect extends Disposable {
             "aria-describedby": "picker-kb-help",
           },
           header(t("Select widget"), { id: "picker-widgets-header" }),
-          sectionTypes.map((value) => {
+          // Forms take submissions through the server, which can't write to encrypted documents.
+          sectionTypes.filter(value => !(value === "form" &&
+            isEncryptedDoc(window.gristDocPageModel?.currentDoc.get()))).map((value) => {
             const widgetInfo = getWidgetTypes(value);
             const disabled = computed(this._value.table,
               (use, tid) => this._isTypeDisabled(value, tid, use(this._value.summarize)),

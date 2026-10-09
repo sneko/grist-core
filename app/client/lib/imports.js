@@ -15,6 +15,7 @@ exports.loadBillingPage = () => import("app/client/ui/BillingPage" /* webpackChu
 exports.loadBootPage = () => import("app/client/ui/BootPage" /* webpackChunkName: "BootPage" */);
 exports.loadAdminPanel = () => import("app/client/ui/AdminPanel" /* webpackChunkName: "AdminPanel" */);
 exports.loadGristDoc = () => import("app/client/components/GristDoc" /* webpackChunkName: "GristDoc" */);
+exports.loadEncryption = () => import("app/client/encryption/index" /* webpackChunkName: "Encryption" */);
 // When importing this way, the module is under the "default" member, not sure why (maybe
 // esbuild-loader's doing).
 exports.loadAce = () => import("ace-builds")

@@ -27,6 +27,7 @@ import { stretchedLink } from "app/client/ui2018/stretchedLink";
 import { buildTabs, TabProps } from "app/client/ui2018/tabs";
 import { unstyledButton, unstyledH2, unstyledUl } from "app/client/ui2018/unstyled";
 import { visuallyHidden } from "app/client/ui2018/visuallyHidden";
+import { isEncryptedDoc } from "app/common/encryption/EncryptionTypes";
 import { HomePageTab } from "app/common/gristUrls";
 import { SortPref } from "app/common/Prefs";
 import * as roles from "app/common/roles";
@@ -320,7 +321,8 @@ export function makeDocOptionsMenu(home: HomeModel, doc: Document) {
     // with a websocket currently, so downloads are only easy
     // to support when the document is open.
     // TODO: support showItemInFolder with electron in a better way.
-    (isElectron ? null :
+    // Encrypted documents can't be downloaded from the server, which only has ciphertext.
+    ((isElectron || isEncryptedDoc(doc)) ? null :
       menuItem(
         () => downloadDocModal(doc, home.app),
         menuIcon("Download"), t("Download document..."),

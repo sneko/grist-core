@@ -1,5 +1,6 @@
 import * as GristDocModule from "app/client/components/GristDoc";
 import * as ViewPane from "app/client/components/ViewPane";
+import * as EncryptionModule from "app/client/encryption/index";
 import * as AirtableImportUI from "app/client/lib/imports/airtable/AirtableImportUI";
 import * as AccountPageModule from "app/client/ui/AccountPage";
 import * as ActivationPageModule from "app/client/ui/ActivationPage";
@@ -33,6 +34,7 @@ export function loadBillingPage(): Promise<typeof BillingPageModule>;
 export function loadBootPage(): Promise<typeof BootPageModule>;
 export function loadAdminPanel(): Promise<typeof AdminPanelModule>;
 export function loadGristDoc(): Promise<typeof GristDocModule>;
+export function loadEncryption(): Promise<typeof EncryptionModule>;
 export function loadAce(): Promise<Ace>;
 export function loadEmojiPicker(): Promise<typeof EmojiPickerModule>;
 export function loadMomentTimezone(): Promise<MomentTimezone>;

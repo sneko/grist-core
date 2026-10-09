@@ -77,6 +77,7 @@ export class Comm extends DisposableWithEvents implements GristServerAPI, DocLis
   private _collectedUserActions: UserAction[] | null;
   private _singleWorkerMode: boolean = getInitialDocAssignment() === null;  // is this classic Grist?
   private _reportError?: (err: Error) => void;  // optional callback for errors
+  private _localWork = 0;
 
   constructor(reportError?: (err: Error) => void) {
     super();
@@ -208,7 +209,20 @@ export class Comm extends DisposableWithEvents implements GristServerAPI, DocLis
    * Returns true if there is one or more request that has not been fully processed.
    */
   public hasActiveRequests(): boolean {
-    return this.pendingRequests.size !== 0;
+    return this.pendingRequests.size !== 0 || this._localWork > 0;
+  }
+
+  /**
+   * Counts the given work as a pending request until it settles. Used for end-to-end encrypted
+   * documents, whose document methods are served by the browser rather than by the server.
+   */
+  public async trackLocalWork<T>(work: Promise<T>): Promise<T> {
+    this._localWork++;
+    try {
+      return await work;
+    } finally {
+      this._localWork--;
+    }
   }
 
   /**

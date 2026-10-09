@@ -1,6 +1,7 @@
 import { makeT } from "app/client/lib/localization";
 import { urlState } from "app/client/models/gristUrlState";
 import { HomeModel } from "app/client/models/HomeModel";
+import { createEncryptedDocAndOpen } from "app/client/ui/CoreNewDocMethods";
 import { revealed } from "app/client/ui/HomeSection";
 import { newDocMethods } from "app/client/ui/NewDocMethods";
 import { bigPrimaryButton } from "app/client/ui2018/buttons";
@@ -30,6 +31,13 @@ export function buildNewDocumentBlock(homeModel: HomeModel, ...args: DomElementA
       dom.boolAttr("disabled", use => !use(homeModel.newDocWorkspace)),
       testId("create-doc"),
     ),
+    getGristConfig().encryption ? cssNewDocAction(
+      cssNewDocActionIcon("Lock"),
+      t("Encrypted document"),
+      dom.on("click", () => createEncryptedDocAndOpen(homeModel)),
+      dom.boolAttr("disabled", use => !use(homeModel.newDocWorkspace) || use(homeModel.newDocWorkspace) === "unsaved"),
+      testId("create-encrypted-doc"),
+    ) : null,
     cssNewDocAction(
       cssNewDocActionIcon("Import"),
       t("Import file"),

@@ -403,6 +403,8 @@ export class Importer extends DisposableWithEvents {
    * Uploads file to the server using the built-in file picker or a plugin instance.
    */
   public async pickAndUploadSource(uploadResult: UploadResult | null = null) {
+    // Imports are parsed by the server, which mustn't see an encrypted document's data.
+    this._docComm.assertServerUploadAllowed();
     try {
       if (!this._importSourceElem) {
         // Use upload result if it was passed in or the built-in file picker.

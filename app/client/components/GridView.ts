@@ -11,6 +11,7 @@ import { renderAllRows } from "app/client/components/Printing";
 import { viewCommands } from "app/client/components/RegionFocusSwitcher";
 import { SelectionSummary } from "app/client/components/SelectionSummary";
 import viewCommon from "app/client/components/viewCommon";
+import { buildPrivateColumnMarker } from "app/client/encryption/EncryptionUI";
 import { onDblClickMatchElem } from "app/client/lib/dblclick";
 import { testId as oldTestId } from "app/client/lib/dom";
 import { isEventOnLink } from "app/client/lib/domUtils";
@@ -1554,6 +1555,7 @@ export default class GridView extends BaseView {
                         field.description,
                         "column",
                       ),
+                      dom.create(buildPrivateColumnMarker, this.gristDoc, field.column.peek()),
                       dom.on("mousedown", ev => isEditingLabel() ? ev.stopPropagation() : true),
                       buildRenameColumn({
                         field,

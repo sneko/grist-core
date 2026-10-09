@@ -70,7 +70,7 @@ export interface HomeModel {
   deleteWorkspace(id: number, forever: boolean): Promise<void>;
   restoreWorkspace(ws: Workspace): Promise<void>;
 
-  createDoc(name: string, workspaceId: number | "unsaved"): Promise<string>;
+  createDoc(name: string, workspaceId: number | "unsaved", options?: { encrypted?: boolean }): Promise<string>;
   renameDoc(docId: string, name: string, options?: RenameDocOptions): Promise<void>;
   deleteDoc(docId: string, forever: boolean): Promise<void>;
   restoreDoc(doc: Document): Promise<void>;
@@ -237,12 +237,17 @@ export class HomeModelImpl extends Disposable implements HomeModel, ViewSettings
   }
 
   // Creates a new doc by calling the API, and returns its docId.
-  public async createDoc(name: string, workspaceId: number | "unsaved"): Promise<string> {
+  public async createDoc(name: string, workspaceId: number | "unsaved",
+    options?: { encrypted?: boolean }): Promise<string> {
     if (workspaceId === "unsaved") {
+      if (options?.encrypted) { throw new Error("Encrypted documents must be saved in a workspace"); }
       const timezone = await guessTimezone();
       return await this._app.api.newUnsavedDoc({ timezone });
     }
-    const id = await this._app.api.newDoc({ name }, workspaceId);
+    const id = await this._app.api.newDoc({
+      name,
+      ...(options?.encrypted ? { options: { encryption: { version: 1 } } } : {}),
+    }, workspaceId);
     await this.updateWorkspaces();
     return id;
   }

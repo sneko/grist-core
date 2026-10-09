@@ -4,6 +4,7 @@
  */
 import { cssPrimarySmallLink, cssSmallButton, cssSmallLinkButton } from "app/client/components/Forms/styles";
 import { GristDoc } from "app/client/components/GristDoc";
+import { buildEncryptionSettings } from "app/client/encryption/EncryptionUI";
 import { ACIndexImpl } from "app/client/lib/ACIndex";
 import { ACSelectItem, buildACSelect } from "app/client/lib/ACSelect";
 import { copyToClipboard } from "app/client/lib/clipboardUtils";
@@ -28,6 +29,7 @@ import { confirmModal, cssModalButtons, cssModalTitle, cssSpinner, modal } from 
 import { buildCurrencyPicker } from "app/client/widgets/CurrencyPicker";
 import { buildTZAutocomplete } from "app/client/widgets/TZAutocomplete";
 import { EngineCode } from "app/common/DocumentSettings";
+import { isEncryptedDoc } from "app/common/encryption/EncryptionTypes";
 import { commonUrls, GristLoadConfig, PREFERRED_STORAGE_ANCHOR } from "app/common/gristUrls";
 import { not, propertyCompare } from "app/common/gutil";
 import { getCurrency, locales } from "app/common/Locales";
@@ -81,6 +83,8 @@ export class DocSettingsPage extends Disposable {
     const isDocOwner = isOwner(docPageModel.currentDoc.get());
     const isDocEditor = isOwnerOrEditor(docPageModel.currentDoc.get());
     const isFork = docPageModel.currentDoc.get()?.isFork;
+    // Encrypted documents can't be read by the server: what relies on it doesn't apply.
+    const isEncrypted = isEncryptedDoc(docPageModel.currentDoc.get());
 
     return cssContainer({ tabIndex: "-1" },
       SectionCard(t("Document settings"), [
@@ -121,7 +125,7 @@ export class DocSettingsPage extends Disposable {
           ),
           disabled: isDocOwner ? false : t("Only available to document owners"),
         }),
-        !isFork ? SectionItem({
+        (!isFork && !isEncrypted) ? SectionItem({
           id: "acceptProposals",
           name: [t("Suggestions"), betaTag(t("experiment"), { style: "margin-left: 4px;" })],
           description: withInfoTooltip(
@@ -156,10 +160,14 @@ export class DocSettingsPage extends Disposable {
         }) : null,
       ]),
 
-      dom.create(buildNotificationsConfig, this._gristDoc.appModel, this._gristDoc.docApi,
+      isEncrypted ? SectionCard(t("Encryption"), [
+        dom.create(buildEncryptionSettings, this._gristDoc),
+      ]) : null,
+
+      isEncrypted ? null : dom.create(buildNotificationsConfig, this._gristDoc.appModel, this._gristDoc.docApi,
         docPageModel.currentDoc.get()),
 
-      SectionCard(t("Data engine"), [
+      isEncrypted ? null : SectionCard(t("Data engine"), [
         SectionItem({
           id: "timings",
           name: t("Formula timer"),
@@ -201,7 +209,7 @@ document is first opened, or when a document responds to changes.",
         }),
       ]),
 
-      SectionCard(t("API"), [
+      isEncrypted ? null : SectionCard(t("API"), [
         SectionItem({
           id: "documentId",
           name: t("Document ID"),
@@ -259,7 +267,7 @@ document is first opened, or when a document responds to changes.",
         }),
       ]),
 
-      isDocOwner ? this._buildAttachmentStorageSection() : null,
+      (isDocOwner && !isEncrypted) ? this._buildAttachmentStorageSection() : null,
     );
   }
 

@@ -2,6 +2,7 @@ import { csvEncodeRow } from "app/common/csvFormat";
 import { CellValue } from "app/common/DocActions";
 import { DocData } from "app/common/DocData";
 import { DocumentSettings } from "app/common/DocumentSettings";
+import { isLockedCell } from "app/common/encryption/LockedCell";
 import * as gristTypes from "app/common/gristTypes";
 import { getReferencedTableId, isList } from "app/common/gristTypes";
 import * as gutil from "app/common/gutil";
@@ -24,8 +25,12 @@ export interface FormatOptions {
  * Formats a value of any type generically (with no type-specific options).
  */
 export function formatUnknown(value: CellValue): string {
+  if (isLockedCell(value)) { return LOCKED_CELL_TEXT; }
   return formatDecoded(decodeObject(value));
 }
+
+// How private values of encrypted documents show to members who can't read them.
+export const LOCKED_CELL_TEXT = "🔒";
 
 /**
  * Returns true if the array contains other arrays or structured objects,
@@ -79,6 +84,7 @@ export class BaseFormatter {
    * AnyFormatter otherwise. This method the recommended API. There is no need to override it.
    */
   public formatAny(value: any, translate?: (val: string) => string): string {
+    if (isLockedCell(value)) { return LOCKED_CELL_TEXT; }
     return this.isRightType(value) ? this.format(value, translate) : formatUnknown(value);
   }
 

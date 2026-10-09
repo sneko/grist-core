@@ -6,6 +6,7 @@ import { getDataLimitInfo } from "app/common/DocLimits";
 import { DocStateComparison } from "app/common/DocState";
 import { createEmptyOrgUsageSummary, DocumentUsage, OrgUsageSummary } from "app/common/DocUsage";
 import { normalizeEmail } from "app/common/emails";
+import { isEncryptedDoc } from "app/common/encryption/EncryptionTypes";
 import {
   ANONYMOUS_PLAN,
   canAddOrgMembers,
@@ -46,10 +47,12 @@ import { Alias } from "app/gen-server/entity/Alias";
 import { BillingAccount } from "app/gen-server/entity/BillingAccount";
 import { BillingAccountManager } from "app/gen-server/entity/BillingAccountManager";
 import { Config } from "app/gen-server/entity/Config";
+import { DocEncryptionKey, DocEncryptionKeyWrap } from "app/gen-server/entity/DocEncryption";
 import { DocPref } from "app/gen-server/entity/DocPref";
 import { Document, FilteredDocument } from "app/gen-server/entity/Document";
 import { Group } from "app/gen-server/entity/Group";
 import { Limit } from "app/gen-server/entity/Limit";
+import { Login } from "app/gen-server/entity/Login";
 import { AccessOption, AccessOptionWithRole, Organization } from "app/gen-server/entity/Organization";
 import { Pref } from "app/gen-server/entity/Pref";
 import {
@@ -1826,7 +1829,7 @@ export class HomeDBManager implements HomeDBAuth {
       const doc = new Document();
       doc.id = docId || makeId();
       doc.checkProperties(props);
-      doc.updateFromProperties(props);
+      doc.updateFromProperties(props, { isNew: true });
       // For some reason, isPinned defaulting to null, not false,
       // for some typeorm/postgres combination? That causes a
       // constraint violation.
@@ -2420,6 +2423,9 @@ export class HomeDBManager implements HomeDBAuth {
       const analysis = await this._usersManager.verifyAndLookupDeltaEmails(userId, delta, false, manager);
       const doc = await this._loadDocAccess(scope, analysis.permissionThreshold, manager);
       this._failIfPowerfulAndChangingSelf(analysis, { data: doc, status: 200 });
+      if (isEncryptedDoc(doc)) {
+        await this._checkEncryptedDocPermissions(doc.id, delta, manager);
+      }
       await this._failIfTooManyNewUserInvites({
         orgKey: doc.workspace.org.id,
         analysis,
@@ -4280,6 +4286,35 @@ export class HomeDBManager implements HomeDBAuth {
           res.access = roles.getWeakestRole("viewers", res.access);
         }
       }
+    }
+  }
+
+  /**
+   * Encrypted documents can only be read by members holding their key, which public access
+   * can't provide: they must remain restricted to their members (as in Docs and Drive). And
+   * removing all members holding the key would leave nobody able to read the document.
+   */
+  private async _checkEncryptedDocPermissions(docId: string, delta: PermissionDelta, manager: EntityManager) {
+    const users = delta.users || {};
+    for (const email of [EVERYONE_EMAIL, ANONYMOUS_USER_EMAIL]) {
+      if (users[email]) {
+        throw new ApiError("Encrypted documents must remain restricted to their members", 400);
+      }
+    }
+    const removedEmails = Object.keys(users).filter(email => users[email] === null).map(normalizeEmail);
+    if (removedEmails.length === 0) { return; }
+    const holders: { email: string }[] = await manager.createQueryBuilder()
+      .select("logins.email", "email")
+      .from(DocEncryptionKeyWrap, "wraps")
+      .innerJoin(DocEncryptionKey, "keys", "keys.doc_id = wraps.doc_id AND keys.key_id = wraps.key_id")
+      .innerJoin(Login, "logins", "logins.user_id = wraps.user_id")
+      .where("wraps.doc_id = :docId", { docId })
+      .andWhere("keys.scope = :scope", { scope: "doc" })
+      .andWhere("keys.retired_at IS NULL")
+      .getRawMany();
+    if (holders.length > 0 && holders.every(h => removedEmails.includes(normalizeEmail(h.email)))) {
+      throw new ApiError("This would leave nobody able to read this encrypted document: " +
+        "keep at least one member holding its key", 400);
     }
   }
 

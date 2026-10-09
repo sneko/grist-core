@@ -1,0 +1,45 @@
+#
+# Local identity provider to try Grist's encrypted documents with the LaSuite encryption service.
+# See README.md in this directory.
+#
+# Ports: Keycloak on 7310 (the encryption repo uses 7200-7209, Docs/Drive's Keycloak uses 8083,
+# Grist uses 8484).
+#
+# Keycloak runs in dev mode with its embedded database: nothing to persist, the realm is
+# imported from realm-export.json on first start. `docker compose down` resets everything.
+#
+
+name: grist-encryption-dev
+
+services:
+  keycloak:
+    container_name: grist_encryption_dev_keycloak
+    # Same image as the encryption repository's docker-compose.yaml.
+    image: quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007
+    security_opt:
+      - no-new-privileges:true
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # The issuer must be the same for the browser, Grist and the encryption service (all on
+      # the host): http://localhost:7310/realms/grist
+      KC_HOSTNAME: http://localhost:7310
+      KC_HOSTNAME_STRICT: 'false'
+      KC_HTTP_ENABLED: 'true'
+      KC_HEALTH_ENABLED: 'true'
+    volumes:
+      - ./realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    ports:
+      - '7310:8080'
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'exec 3<>/dev/tcp/localhost/9000; echo -e "GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3; grep "HTTP/1.1 200 OK" <&3',
+        ]
+      start_period: 30s
+      interval: 2s
+      timeout: 2s
+      retries: 15

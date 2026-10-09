@@ -1,3 +1,4 @@
+import { downloadActiveSection, LocalExportFormat } from "app/client/encryption/localExport";
 import { hooks } from "app/client/Hooks";
 import { loadUserManager } from "app/client/lib/imports";
 import { makeT } from "app/client/lib/localization";
@@ -28,6 +29,7 @@ import {
   menuItemSubmenu,
   menuText,
 } from "app/client/ui2018/menus";
+import { isEncryptedDoc } from "app/common/encryption/EncryptionTypes";
 import { buildUrlId, isFeatureEnabled, parseUrlId } from "app/common/gristUrls";
 import * as roles from "app/common/roles";
 import { Document } from "app/common/UserAPI";
@@ -113,6 +115,12 @@ export function buildShareMenuButton(pageModel: DocPageModel): DomContents {
           menuExports(doc, pageModel),
         ]);
       }
+    } else if (isEncryptedDoc(doc)) {
+      // The server can't copy or export encrypted documents: exports are made by the browser.
+      return shareButton(null, () => [
+        menuManageUsers(doc, pageModel),
+        menuLocalExports(pageModel),
+      ]);
     } else {
       return shareButton(null, () => [
         menuManageUsers(doc, pageModel),
@@ -302,6 +310,39 @@ function menuWorkOnCopy(pageModel: DocPageModel, options?: {
 }
 
 /**
+ * Exports of end-to-end encrypted documents, built in the browser from the active widget.
+ */
+function menuLocalExports(pageModel: DocPageModel) {
+  const gristDoc = pageModel.gristDoc.get();
+  if (!gristDoc) { return null; }
+  const exportAs = (format: LocalExportFormat) => () => {
+    if (typeof gristDoc.activeViewId.get() !== "number") {
+      reportWarning(t("Exporting is only available from document pages. Please select a document page and try again."),
+        { key: "exporting-not-available" });
+      return;
+    }
+    try {
+      downloadActiveSection(gristDoc, format);
+    } catch (e) {
+      reportError(e);
+    }
+  };
+  return [
+    menuDivider(),
+    menuItemSubmenu(
+      () => [
+        menuItem(exportAs("csv"), t("Comma Separated Values (.csv)"), testId("tb-share-option")),
+        menuItem(exportAs("tsv"), t("Tab Separated Values (.tsv)"), testId("tb-share-option")),
+      ],
+      {},
+      menuIcon("Download"),
+      t("Export as..."),
+      testId("tb-share-option"),
+    ),
+  ];
+}
+
+/**
  * The part of the menu with "Download" and "Export as..." items.
  */
 function menuExports(doc: Document, pageModel: DocPageModel) {
@@ -395,7 +436,15 @@ async function manageUsers(doc: DocInfo, docPageModel: DocPageModel) {
     // On save, re-fetch the document info, to toggle the "Public Access" icon if it changed.
     // Skip if personal, since personal cannot affect "Public Access", and the only
     // change possible is to remove the user (which would make refreshCurrentDoc fail)
-    onSave: async personal => !personal && docPageModel.refreshCurrentDoc(doc),
+    onSave: async (personal) => {
+      if (personal) { return; }
+      await docPageModel.refreshCurrentDoc(doc);
+      // For encrypted documents, give keys to newly added members right away (owners only).
+      const encryption = docPageModel.gristDoc.get()?.docComm.encryption;
+      if (encryption?.isOwner) {
+        encryption.grantPendingKeys().catch(reportError);
+      }
+    },
     reload: () => api.getDocAccess(doc.id),
   });
 }

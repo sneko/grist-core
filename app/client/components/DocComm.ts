@@ -10,6 +10,8 @@ import { docUrl } from "app/common/urlUtils";
 import { Events as BackboneEvents } from "backbone";
 import { Disposable, Emitter } from "grainjs";
 
+import type { IDocEncryption } from "app/client/encryption/types";
+
 const SLOW_NOTIFICATION_TIMEOUT_MS = 1000; // applies to user actions only
 
 /**
@@ -57,6 +59,17 @@ export class DocComm extends Disposable implements ActiveDocAPI {
 
   public changeUrlIdEmitter = this.autoDispose(new Emitter());
 
+  // Whether this is an end-to-end encrypted document, whose data the server mustn't see.
+  public readonly isEncrypted: boolean = false;
+
+  // For encrypted documents: keys, members and private columns (see EncryptionUI.ts).
+  public encryption?: IDocEncryption;
+
+  // Encrypted documents (see EncryptedDocComm) handle attachments themselves: they are encrypted
+  // in the browser, and only shown decrypted there.
+  public uploadEncryptedAttachments?: (files: File[], target?: { tableId: string, colId: string }) => Promise<number[]>;
+  public getEncryptedAttachmentUrl?: (attId: number) => Promise<string>;
+
   // We save the clientId that was used when opening the doc. If it changes (e.g. reconnecting to
   // another server), it would be incorrect to use the new clientId without re-opening the doc
   // (which is handled by App.ts). This way, Comm can protect against mismatched clientIds.
@@ -84,6 +97,16 @@ export class DocComm extends Disposable implements ActiveDocAPI {
         }
       }
     });
+  }
+
+  /**
+   * Throws if files can't be uploaded to the server for this document, which is the case for end-to-end
+   * encrypted documents. Call before uploading, since an upload sends the files in the clear.
+   */
+  public assertServerUploadAllowed() {
+    if (this.isEncrypted) {
+      throw new Error("Uploading files is not available for end-to-end encrypted documents yet");
+    }
   }
 
   // Returns the URL params that identifying this open document to the DocWorker
@@ -142,6 +165,12 @@ export class DocComm extends Disposable implements ActiveDocAPI {
     return await (this._forkPromise || (this._forkPromise = this._doForkDoc()));
   }
 
+  // Overridden for end-to-end encrypted documents, whose methods are served by the browser itself
+  // (see app/client/encryption/EncryptedDocComm.ts).
+  protected _callDocMethod(name: keyof ActiveDocAPI, ...args: any[]): Promise<any> {
+    return this._comm._makeRequest(this._clientId, this._docId, name, this._docFD, ...args);
+  }
+
   // Clean up connection after closing doc.
   private async _shutdown() {
     console.log(`DocComm: shutdown clientId ${this._clientId} docFD ${this._docFD}`);
@@ -197,10 +226,6 @@ export class DocComm extends Disposable implements ActiveDocAPI {
       }
       throw err;
     }
-  }
-
-  private _callDocMethod(name: keyof ActiveDocAPI, ...args: any[]): Promise<any> {
-    return this._comm._makeRequest(this._clientId, this._docId, name, this._docFD, ...args);
   }
 
   private async _doForkDoc(): Promise<string> {

@@ -9,6 +9,7 @@ import { BulkColValues, TableColValues, TableRecordValue, TableRecordValues,
 import { DocCreationInfo, OpenDocMode } from "app/common/DocListAPI";
 import { DocStateComparison, DocStates } from "app/common/DocState";
 import { ApiCallsUsage, OrgUsageSummary } from "app/common/DocUsage";
+import { DocEncryptionOptions } from "app/common/encryption/EncryptionTypes";
 import { Features, Product } from "app/common/Features";
 import { isClient } from "app/common/gristUrls";
 import { encodeQueryParams } from "app/common/gutil";
@@ -213,6 +214,8 @@ export interface DocumentOptions {
   // Whether search engines should index this document. Defaults to `false`.
   allowIndex?: boolean;
   proposedChanges?: ProposedChanges | null;
+  // Set for end-to-end encrypted documents. Can only be set when creating a document.
+  encryption?: DocEncryptionOptions | null;
 }
 
 export interface TutorialMetadata {

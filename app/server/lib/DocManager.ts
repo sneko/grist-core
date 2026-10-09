@@ -5,6 +5,7 @@ import { delay } from "app/common/delay";
 import { DocCreationInfo, OpenDocMode, OpenDocOptions, OpenLocalDocResult } from "app/common/DocListAPI";
 import { DocumentSettings, DocumentSettingsChecker } from "app/common/DocumentSettings";
 import { FilteredDocUsageSummary } from "app/common/DocUsage";
+import { ENCRYPTED_DOC_SERVER_ERROR, isEncryptedDoc } from "app/common/encryption/EncryptionTypes";
 import { parseUrlId, SHARE_KEY_PREFIX } from "app/common/gristUrls";
 import { safeJsonParse } from "app/common/gutil";
 import { TelemetryMetadataByLevel } from "app/common/Telemetry";
@@ -630,6 +631,12 @@ export class DocManager extends EventEmitter implements IMemoryLoadEstimator {
 
   private async _createActiveDoc(docSession: OptDocSession, docName: string, safeMode?: boolean) {
     const doc = await this._getDoc(docSession, docName);
+    if (isEncryptedDoc(doc)) {
+      // The server can't read encrypted documents, so it never opens them: browsers do (see
+      // app/server/lib/encryption/EncryptionRelay.ts). Anything that would need to (forks, exports, the REST
+      // API on its data, etc.) is unavailable for them.
+      throw new ApiError(ENCRYPTED_DOC_SERVER_ERROR, 400);
+    }
     // Get URL for document for use with SELF_HYPERLINK().
     const docUrls = doc && await this._getDocUrls(doc);
     const activeDoc = new ActiveDoc(this, docName, this._attachmentStoreProvider, { ...docUrls, safeMode, doc });

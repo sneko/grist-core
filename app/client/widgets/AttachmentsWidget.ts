@@ -22,7 +22,7 @@ import { GristObjCode } from "app/plugin/GristData";
 
 import { extname } from "path";
 
-import { Computed, dom, DomContents, fromKo, input, Observable, onElem, styled } from "grainjs";
+import { Computed, dom, DomContents, DomElementArg, fromKo, input, Observable, onElem, styled } from "grainjs";
 
 const t = makeT("AttachmentsWidget");
 
@@ -148,7 +148,7 @@ export class AttachmentsWidget extends NewAbstractWidget {
       dom.style("width", use => `${parseInt(use(this._height), 10) * ratio}px`),
       // TODO: Update to legitimately determine whether a file preview exists.
       hasPreview ? dom("img", { style: "height: 100%; min-width: 100%; vertical-align: top;" },
-        dom.attr("src", this._getUrl(value, cell)),
+        this._buildSrc(value, cell),
       ) : renderFileType(filename, fileIdent, this._height),
       // Open editor as if with input, using it to tell it which of the attachments to show. We
       // pass in a 1-based index. Hitting a key opens the cell, and this approach allows an
@@ -156,6 +156,16 @@ export class AttachmentsWidget extends NewAbstractWidget {
       dom.on("dblclick", ev => commands.allCommands.input.run(String(allValues.get().indexOf(value) + 1), ev)),
       testId("pw-thumbnail"),
     );
+  }
+
+  // Sets the image's source: the attachment's url, or for encrypted documents, its decrypted
+  // content (once available).
+  private _buildSrc(attId: number, cell: SingleCell): DomElementArg {
+    const getEncryptedUrl = this._getDocComm().getEncryptedAttachmentUrl;
+    if (!getEncryptedUrl) { return dom.attr("src", this._getUrl(attId, cell)); }
+    return (elem: Element) => {
+      getEncryptedUrl(attId).then(url => elem.setAttribute("src", url)).catch(reportError);
+    };
   }
 
   // Returns the attachment download url, View-as-aware so previews respect ACLs.
@@ -199,6 +209,9 @@ export class AttachmentsWidget extends NewAbstractWidget {
     try {
       const files = await selectPicker({ multiple: true });
       if (!files.length) { return; }
+      if (this._getDocComm().uploadEncryptedAttachments) {
+        return await this._encryptAndSave(rowId, value, files);
+      }
       checkBrowserUploadSizeLimit(files, "attachment");
       const uploadResult = await this._docApi.upload(files, {
         onProgress: (progress) => {
@@ -225,6 +238,9 @@ export class AttachmentsWidget extends NewAbstractWidget {
     commands.allCommands.setCursor.run(row, this.field);
     try {
       const fileArray = Array.from(files);
+      if (this._getDocComm().uploadEncryptedAttachments) {
+        return await this._encryptAndSave(rowId, value, fileArray);
+      }
       checkBrowserUploadSizeLimit(fileArray, "attachment");
       const uploadResult = await this._docApi.upload(fileArray, {
         onProgress: (progress) => {
@@ -241,11 +257,29 @@ export class AttachmentsWidget extends NewAbstractWidget {
     }
   }
 
+  // For encrypted documents: files are encrypted in the browser, then added.
+  private async _encryptAndSave(rowId: UIRowId, value: KoSaveableObservable<CellValue>, files: File[]) {
+    this._setUploadingState(rowId, true);
+    try {
+      const attIds = await this._getDocComm().uploadEncryptedAttachments!(files,
+        { tableId: this.field.tableId(), colId: this.field.colId() });
+      await this._saveAttachmentIds(rowId, value, attIds);
+    } finally {
+      this._setUploadingState(rowId, false);
+    }
+  }
+
   private async _save(rowId: UIRowId, value: KoSaveableObservable<CellValue>,
     uploadResult: UploadResult | null,
   ): Promise<void> {
     if (!uploadResult) { return; }
+    // Upload the attachments.
+    const rowIds = await this._getDocComm().addAttachments(uploadResult.uploadId);
+    await this._saveAttachmentIds(rowId, value, rowIds);
+  }
 
+  private async _saveAttachmentIds(rowId: UIRowId, value: KoSaveableObservable<CellValue>,
+    rowIds: number[]): Promise<void> {
     // Add a row if one doesn't already exist.
     if (rowId === "new") {
       const viewSection = this.field.viewSection();
@@ -256,9 +290,6 @@ export class AttachmentsWidget extends NewAbstractWidget {
 
       rowId = await view.insertRow()!;
     }
-
-    // Upload the attachments.
-    const rowIds = await this._getDocComm().addAttachments(uploadResult.uploadId);
 
     const tableId = this.field.tableId();
     const tableData = this._getDocData().getTable(tableId);

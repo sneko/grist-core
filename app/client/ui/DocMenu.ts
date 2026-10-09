@@ -21,6 +21,7 @@ import { icon } from "app/client/ui2018/icons";
 import { loadingSpinner } from "app/client/ui2018/loaders";
 import { menu, menuItem, menuText, select } from "app/client/ui2018/menus";
 import { confirmModal } from "app/client/ui2018/modals";
+import { isEncryptedDoc } from "app/common/encryption/EncryptionTypes";
 import { IHomePage } from "app/common/gristUrls";
 import { SortPref, ViewPref } from "app/common/Prefs";
 import * as roles from "app/common/roles";
@@ -316,6 +317,7 @@ function buildWorkspaceDocBlock(
             css.docName(doc.name, testId("doc-name")),
             css.docPinIcon("PinSmall", dom.show(doc.isPinned)),
             doc.public ? css.docPublicIcon("Public", testId("public")) : null,
+            isEncryptedDoc(doc) ? css.docPublicIcon("Lock", testId("encrypted")) : null,
           ),
           css.docRowUpdatedAt(getUpdatedAt(doc), testId("doc-time")),
           (doc.removedAt || doc.disabledAt ?

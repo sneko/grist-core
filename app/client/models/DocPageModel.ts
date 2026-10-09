@@ -1,9 +1,10 @@
 import { GristDoc, GristDocImpl } from "app/client/components/GristDoc";
 import { IUndoState } from "app/client/components/UndoStack";
 import { UnsavedChange } from "app/client/components/UnsavedChanges";
-import { loadGristDoc } from "app/client/lib/imports";
+import { loadEncryption, loadGristDoc } from "app/client/lib/imports";
 import { makeT } from "app/client/lib/localization";
 import { logTelemetryEvent } from "app/client/lib/telemetry";
+import { selectPicker } from "app/client/lib/uploads";
 import { AppModel, getOrgNameOrGuest, reportError } from "app/client/models/AppModel";
 import { getDoc } from "app/client/models/gristConfigCache";
 import { docUrl, urlState } from "app/client/models/gristUrlState";
@@ -25,6 +26,7 @@ import { delay } from "app/common/delay";
 import { OpenDocMode, OpenDocOptions, OpenLocalDocResult, UserOverride } from "app/common/DocListAPI";
 import { createEmptyDocStateComparison } from "app/common/DocState";
 import { FilteredDocUsageSummary } from "app/common/DocUsage";
+import { isEncryptedDoc, LOCAL_IMPORT_EXTENSIONS } from "app/common/encryption/EncryptionTypes";
 import { Features, mergedFeatures, Product } from "app/common/Features";
 import {
   buildUrlId,
@@ -35,6 +37,7 @@ import {
 } from "app/common/gristUrls";
 import { getReconnectTimeout } from "app/common/gutil";
 import { canEdit, isOwner } from "app/common/roles";
+import { getGristConfig } from "app/common/urlUtils";
 import { UserInfo } from "app/common/User";
 import {
   DOCTYPE_TEMPLATE,
@@ -500,7 +503,17 @@ contact the document owners to attempt a document recovery. [{{error}}]", { erro
     comm.useDocConnection(doc.id);
     flow.onDispose(() => comm.releaseDocConnection(doc.id));
 
-    const openDocResponse = await comm.openDoc(doc.id, {
+    // End-to-end encrypted documents aren't opened by the server but by the browser itself.
+    const encryptionConfig = getGristConfig().encryption;
+    if (isEncryptedDoc(doc) && !encryptionConfig) {
+      throw new Error(t("End-to-end encrypted documents are not enabled on this server"));
+    }
+    const encrypted = isEncryptedDoc(doc) ? await loadEncryption().then(m =>
+      m.EncryptedDocSession.open(comm, doc.id, encryptionConfig!,
+        { isCancelled: () => flow.isCancelled })) : null;
+    // The flow owns the session until the DocComm takes it over.
+    if (encrypted) { flow.autoDispose(encrypted.session); }
+    const openDocResponse = encrypted ? encrypted.openResponse : await comm.openDoc(doc.id, {
       openMode: doc.openMode,
       linkParameters,
       originalUrlId: options.originalUrlId,
@@ -516,7 +529,10 @@ contact the document owners to attempt a document recovery. [{{error}}]", { erro
       this.updateCurrentDocUsage(openDocResponse.docUsage);
     }
     const gdModule = await gristDocModulePromise;
-    const docComm = gdModule.DocComm.create(flow, comm, openDocResponse, doc.id, this.appModel.notifier);
+    const docComm = encrypted ?
+      (await loadEncryption()).EncryptedDocComm.create(flow, comm, openDocResponse, doc.id, this.appModel.notifier,
+        flow.release(encrypted.session)) :
+      gdModule.DocComm.create(flow, comm, openDocResponse, doc.id, this.appModel.notifier);
     flow.checkIfCancelled();
 
     docComm.changeUrlIdEmitter.addListener(async (newUrlId: string, openResponse: OpenLocalDocResult) => {
@@ -577,6 +593,8 @@ contact the document owners to attempt a document recovery. [{{error}}]", { erro
         }),
     );
     this.proposalNewChangesCount.set(gristDoc.getActionCounter().countFromMark.get());
+    // The client is ready for changes from other browsers now.
+    encrypted?.session.resume();
   }
 
   private _getDocKey(state: IGristUrlState) {
@@ -586,6 +604,19 @@ contact the document owners to attempt a document recovery. [{{error}}]", { erro
     const docKey = `${urlOpenMode}:${urlId}:${compareUrlId}`;
     return docKey;
   }
+}
+
+function buildEncryptedImportMenuItem(gristDoc: GristDoc, isReadonly: boolean): DomContents {
+  const importFiles = async () => {
+    const files = await selectPicker({ multiple: true, extensions: LOCAL_IMPORT_EXTENSIONS });
+    if (!files.length) { return; }
+    await gristDoc.docComm.encryption!.importFiles(files);
+  };
+  return menuItem(() => importFiles().catch(reportError),
+    menuIcon("Import"), t("Import from file"),
+    testId("dp-import-encrypted"),
+    dom.cls("disabled", isReadonly),
+  );
 }
 
 function addMenu(importSources: ImportSource[], gristDoc: GristDoc, isReadonly: boolean): DomElementArg[] {
@@ -609,8 +640,12 @@ function addMenu(importSources: ImportSource[], gristDoc: GristDoc, isReadonly: 
       dom.cls("disabled", isReadonly),
     ),
     menuDivider(),
-    buildImportMenu(importSources, isReadonly),
-    buildDocGristImportMenuItem(gristDoc, isReadonly),
+    // Imports are parsed by the server, which mustn't see an encrypted document's data: for
+    // encrypted documents, files are parsed in the browser instead.
+    gristDoc.docComm.encryption ? buildEncryptedImportMenuItem(gristDoc, isReadonly) : [
+      buildImportMenu(importSources, isReadonly),
+      buildDocGristImportMenuItem(gristDoc, isReadonly),
+    ],
     isReadonly ? menuText(t("You do not have edit access to this document")) : null,
     testId("dp-add-new-menu"),
   ];

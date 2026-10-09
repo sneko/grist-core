@@ -63,9 +63,11 @@ export class AttachmentsEditor extends NewBaseEditor {
   private _isUploading: Observable<boolean>;
   private _index: LiveIndex;
   private _selected: Computed<Attachment | null>;
+  private _target: { tableId: string, colId: string };
 
   constructor(options: FieldOptions) {
     super(options);
+    this._target = { tableId: options.field.column().table().tableId(), colId: options.field.colId() };
 
     const docData: DocData = options.gristDoc.docData;
     const cellValue: CellValue = options.cellValue;
@@ -88,7 +90,9 @@ export class AttachmentsEditor extends NewBaseEditor {
     this._rowIds = obsArray(Array.isArray(cellValue) ? cellValue.slice(1) as number[] : []);
     this._attachments = computedArray(this._rowIds, (val: number): Attachment => {
       const fileIdent: string = this._attachmentsTable.getValue(val, "fileIdent")!;
-      const fileType = mimeTypes.lookup(fileIdent) || "application/octet-stream";
+      // (Encrypted documents' fileIdent has no extension: then look at the file's name.)
+      const fileType = mimeTypes.lookup(fileIdent) ||
+        mimeTypes.lookup(this._attachmentsTable.getValue(val, "fileName") || "") || "application/octet-stream";
       const filename: Observable<string> =
         observable(this._attachmentsTable.getValue(val, "fileName")!);
       return {
@@ -97,8 +101,8 @@ export class AttachmentsEditor extends NewBaseEditor {
         fileType,
         filename,
         hasPreview: Boolean(this._attachmentsTable.getValue(val, "imageHeight")),
-        url: computed(use => this._getUrl(cell, val, use(filename))),
-        inlineUrl: computed(use => this._getUrl(cell, val, use(filename), true)),
+        url: this._makeUrl(cell, val, filename),
+        inlineUrl: this._makeUrl(cell, val, filename, true),
       };
     });
     this._index = makeLiveIndex(this, this._attachments, initRowIndex);
@@ -219,6 +223,17 @@ export class AttachmentsEditor extends NewBaseEditor {
     att.filename.set(this._attachmentsTable.getValue(att.rowId, "fileName")!);
   }
 
+  // The attachment's url, or for encrypted documents, a local url to its decrypted content (once
+  // available).
+  private _makeUrl(cell: SingleCell | null, attId: number, filename: Observable<string>,
+    inline?: boolean): Observable<string> {
+    const getEncryptedUrl = this._docComm.getEncryptedAttachmentUrl;
+    if (!getEncryptedUrl) { return computed(use => this._getUrl(cell, attId, use(filename), inline)); }
+    const url = observable("");
+    getEncryptedUrl(attId).then(u => url.set(u)).catch(reportError);
+    return url;
+  }
+
   private _getUrl(
     cell: SingleCell | null,
     attId: number,
@@ -247,6 +262,9 @@ export class AttachmentsEditor extends NewBaseEditor {
     try {
       const files = await selectPicker({ multiple: true });
       if (!files.length) { return; }
+      if (this._docComm.uploadEncryptedAttachments) {
+        return await this._encryptAndAdd(files);
+      }
       checkBrowserUploadSizeLimit(files, "attachment");
       const uploadResult = await this._docApi.upload(files, {
         onProgress: (progress) => {
@@ -268,6 +286,9 @@ export class AttachmentsEditor extends NewBaseEditor {
   private async _upload(files: FileList): Promise<void> {
     try {
       const fileArray = Array.from(files);
+      if (this._docComm.uploadEncryptedAttachments) {
+        return await this._encryptAndAdd(fileArray);
+      }
       checkBrowserUploadSizeLimit(fileArray, "attachment");
       const uploadResult = await this._docApi.upload(fileArray, {
         onProgress: (progress) => {
@@ -286,9 +307,22 @@ export class AttachmentsEditor extends NewBaseEditor {
     }
   }
 
+  // For encrypted documents: files are encrypted in the browser, then added.
+  private async _encryptAndAdd(files: File[]): Promise<void> {
+    this._isUploading.set(true);
+    try {
+      this._addIds(await this._docComm.uploadEncryptedAttachments!(files, this._target));
+    } finally {
+      if (!this.isDisposed()) { this._isUploading.set(false); }
+    }
+  }
+
   private async _add(uploadResult: UploadResult | null): Promise<void> {
     if (!uploadResult) { return; }
-    const rowIds = await this._docComm.addAttachments(uploadResult.uploadId);
+    this._addIds(await this._docComm.addAttachments(uploadResult.uploadId));
+  }
+
+  private _addIds(rowIds: number[]) {
     if (this.isDisposed()) { return; }
     const len = this._rowIds.get().length;
     if (rowIds.length > 0) {

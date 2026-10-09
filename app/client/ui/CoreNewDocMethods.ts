@@ -22,6 +22,22 @@ export async function createDocAndOpen(home: HomeModel) {
   }
 }
 
+/**
+ * Creates an end-to-end encrypted document (see app/common/encryption/EncryptionTypes.ts) and opens it,
+ * which sets up its key. Its content is never readable by the server.
+ */
+export async function createEncryptedDocAndOpen(home: HomeModel) {
+  const destWS = home.newDocWorkspace.get();
+  if (!destWS || destWS === "unsaved") { return; }
+  try {
+    const docId = await home.createDoc(t("Untitled encrypted document"), destWS.id, { encrypted: true });
+    const doc = await home.app.api.getDoc(docId);
+    await urlState().pushUrl(docUrl(doc));
+  } catch (err) {
+    reportError(err);
+  }
+}
+
 export async function importDocAndOpen(home: HomeModel) {
   const destWS = home.newDocWorkspace.get();
   if (!destWS) { return; }

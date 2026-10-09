@@ -22,6 +22,7 @@ import { EmptyFilterState } from "app/client/components/LinkingState";
 import { RefSelect } from "app/client/components/RefSelect";
 import { kbJumperAnchor } from "app/client/components/RegionFocusSwitcher";
 import ViewConfigTab from "app/client/components/ViewConfigTab";
+import { buildColumnPrivacySection } from "app/client/encryption/EncryptionUI";
 import { domAsync } from "app/client/lib/domAsync";
 import * as imports from "app/client/lib/imports";
 import { makeT } from "app/client/lib/localization";
@@ -372,6 +373,12 @@ export class RightPanel extends Disposable {
             dom.maybe<FieldBuilder | null>(fieldBuilder, builder => builder.buildTransformDom()),
             testId("panel-transform"),
           ),
+          // For encrypted documents: who can read the column.
+          this._gristDoc.docComm.encryption ? [
+            cssSeparator(),
+            cssSection(dom.create(buildColumnPrivacySection, this._gristDoc, origColumn),
+              testId("panel-privacy")),
+          ] : null,
           this._disableIfReadonly(),
         ),
       );

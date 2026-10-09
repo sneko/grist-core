@@ -169,6 +169,10 @@ export class Client {
     return Boolean(this._websocket);
   }
 
+  public isDestroyed(): boolean {
+    return this._destroyed;
+  }
+
   /**
    * Returns DocSession for the given docFD, or throws an exception if this doc is not open.
    */

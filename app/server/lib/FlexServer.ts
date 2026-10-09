@@ -55,6 +55,9 @@ import {
 } from "app/server/lib/DocWorkerIdentity";
 import { DocWorkerLoadTracker, getDocWorkerLoadTracker } from "app/server/lib/DocWorkerLoadTracker";
 import { DocWorkerInfo, IDocWorkerMap } from "app/server/lib/DocWorkerMap";
+import { isEncryptionEnabled } from "app/server/lib/encryption/encryptionConfig";
+import { EncryptionRelay } from "app/server/lib/encryption/EncryptionRelay";
+import { addEncryptionEngineEndpoints } from "app/server/lib/encryption/engineAssets";
 import { expressWrap, jsonErrorHandler, secureJsonErrorHandler } from "app/server/lib/expressWrap";
 import { Hosts, RequestWithOrg } from "app/server/lib/extractOrg";
 import { addGoogleAuthEndpoint } from "app/server/lib/GoogleAuth";
@@ -897,6 +900,10 @@ export class FlexServer implements GristServer {
     // If there is a static ext directory, serve material from there as well.
     // This is used to run Grist with full edition extensions downloaded at
     // runtime, and is also handy for extensions such as an Electron app.
+    // Browsers run the data engine themselves for end-to-end encrypted documents.
+    if (isEncryptionEnabled()) {
+      addEncryptionEngineEndpoints(this.app);
+    }
     const staticExtDir = process.env.GRIST_STATIC_EXT_DIR || getAppPathTo(this.appRoot, "static") + "_ext";
     const staticExtApp = fse.existsSync(staticExtDir) ?
       express.static(staticExtDir, serveAnyOrigin) : null;
@@ -1759,6 +1766,11 @@ export class FlexServer implements GristServer {
     // Register the websocket comm functions associated with the docworker.
     docWorker.registerCommCore();
     docWorker.registerCommPlugin();
+
+    // End-to-end encrypted documents aren't opened by the server, only relayed.
+    if (this._dbManager && !isSingleUserMode()) {
+      new EncryptionRelay(this._dbManager, this.getStorageManager()).registerCommMethods(this._comm);
+    }
 
     // Doc-specific endpoints require authorization; collect the relevant middleware in one list.
     const docAccessMiddleware = [

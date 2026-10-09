@@ -46,3 +46,9 @@
   border-left: 11px solid transparent;
   cursor: pointer;
 }
+
+/* Private values of encrypted documents, for members who can't read them. */
+.field_clip.field_locked {
+  color: var(--grist-theme-text-light, #929299);
+  cursor: not-allowed;
+}

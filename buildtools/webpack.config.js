@@ -28,6 +28,8 @@ module.exports = {
     apiconsole: "app/client/apiconsole",
     billing: "app/client/billingMain",
     form: "app/client/formMain",
+    // Web Worker running the data engine for end-to-end encrypted documents.
+    encryptionEngineWorker: "app/client/encryption/engineWorker",
     // Include client test harness if it is present (it won't be in
     // docker image).
     ...(fs.existsSync("test/client-harness/client.js") ? {

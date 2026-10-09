@@ -33,6 +33,7 @@ import { confirmModal } from "app/client/ui2018/modals";
 import { stretchedLink } from "app/client/ui2018/stretchedLink";
 import { unstyledButton } from "app/client/ui2018/unstyled";
 import { buildOpenAssistantButton } from "app/client/widgets/AssistantPopup";
+import { isEncryptedDoc } from "app/common/encryption/EncryptionTypes";
 import { isOwner } from "app/common/roles";
 
 import { Computed, computed, Disposable, dom, makeTestId,
@@ -45,6 +46,9 @@ const t = makeT("Tools");
 export function tools(owner: Disposable, gristDoc: GristDoc, leftPanelOpen: Observable<boolean>): Element {
   const docPageModel = gristDoc.docPageModel;
   const isDocOwner = isOwner(docPageModel.currentDoc.get());
+  // In end-to-end encrypted documents, the server can't enforce access rules nor run automations
+  // (it can't read the data), so these tools don't apply.
+  const isEncrypted = isEncryptedDoc(docPageModel.currentDoc.get());
   const isOverridden = Boolean(docPageModel.userOverride.get());
   const canMakeProposal = Computed.create(owner, (use) => {
     return use(docPageModel.isFork) && !use(docPageModel.isBareFork) && !use(docPageModel.isPrefork) &&
@@ -67,8 +71,9 @@ export function tools(owner: Disposable, gristDoc: GristDoc, leftPanelOpen: Obse
     fixOutlineOverflow,
     cssTools.cls("-collapsed", use => !use(leftPanelOpen)),
     cssSectionHeader(cssSectionHeaderText(t("TOOLS"), { id: "grist-tools-heading" })),
-    buildOpenAssistantButton(gristDoc, testId("assistant")),
-    cssPageEntry(
+    // The assistant sends document content to an AI service: not for encrypted documents.
+    isEncrypted ? null : buildOpenAssistantButton(gristDoc, testId("assistant")),
+    isEncrypted ? null : cssPageEntry(
       cssPageEntry.cls("-selected", use => use(gristDoc.activeViewId) === "acl"),
       cssPageEntry.cls("-disabled", use => !use(canViewAccessRules)),
       dom.domComputedOwned(canViewAccessRules, (computedOwner, _canViewAccessRules) => {
@@ -114,7 +119,7 @@ export function tools(owner: Disposable, gristDoc: GristDoc, leftPanelOpen: Obse
         dom.on("click", () => gristDoc.showTool("docHistory"))),
     ),
     dom.maybe(
-      trunkAcceptsProposals, () => {
+      use => !isEncrypted && use(trunkAcceptsProposals), () => {
         return cssPageEntry(
           cssPageEntry.cls("-selected", use => use(gristDoc.activeViewId) === "suggestions"),
           cssPageLink(
@@ -143,7 +148,7 @@ export function tools(owner: Disposable, gristDoc: GristDoc, leftPanelOpen: Obse
       ),
       testId("code"),
     ),
-    createAutomationsPageEntry(gristDoc, isDocOwner),
+    isEncrypted ? null : createAutomationsPageEntry(gristDoc, isDocOwner),
     cssPageEntry(
       cssPageEntry.cls("-selected", use => use(gristDoc.activeViewId) === "settings"),
       cssPageLink(cssPageIcon("Settings"),

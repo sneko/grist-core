@@ -38,6 +38,7 @@ export async function parsePasteForView(
   // If we have pasted-in files, they can go into Attachments-type columns. We collect the tasks
   // to upload them, and perform after going through the paste data.
   const uploadTasks: { colId: string, valueIndex: number, fileList: File[] }[] = [];
+  const tableId = fields[0]?.column.peek().table.peek().tableId.peek() || "";
 
   data.forEach((col, idx) => {
     const field = fields[idx];
@@ -110,6 +111,11 @@ export async function parsePasteForView(
   const uploads = new Map<File[], Promise<CellValue>>();
   for (const { colId, valueIndex, fileList } of uploadTasks) {
     const value = await getSetMapValue(uploads, fileList, async (): Promise<CellValue> => {
+      const uploadEncrypted = gristDoc.docComm.uploadEncryptedAttachments;
+      if (uploadEncrypted) {
+        // Encrypted documents encrypt attachments in the browser.
+        return [GristObjCode.List, ...await uploadEncrypted(fileList, { tableId, colId })];
+      }
       checkBrowserUploadSizeLimit(fileList, "attachment");
       const uploadResult = await gristDoc.docApi.upload(fileList);
 

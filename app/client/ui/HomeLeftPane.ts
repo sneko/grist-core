@@ -10,6 +10,7 @@ import { HomeModel } from "app/client/models/HomeModel";
 import { getWorkspaceInfo, workspaceName } from "app/client/models/WorkspaceInfo";
 import { addNewButton, cssAddNewButton } from "app/client/ui/AddNewButton";
 import { getAdminPanelName } from "app/client/ui/AdminPanelName";
+import { createEncryptedDocAndOpen } from "app/client/ui/CoreNewDocMethods";
 import { buildHomeGristImportMenuItem } from "app/client/ui/GristImportEntryPoints";
 import {
   createAccessibilityTools,
@@ -211,6 +212,11 @@ function addMenu(home: HomeModel, creating: Observable<boolean>): DomElementArg[
       dom.cls("disabled", !home.newDocWorkspace.get()),
       testId("dm-new-doc"),
     ),
+    getGristConfig().encryption ? menuItem(() => createEncryptedDocAndOpen(home), menuIcon("Lock"),
+      t("Create encrypted document"),
+      dom.cls("disabled", use => !use(home.newDocWorkspace) || use(home.newDocWorkspace) === "unsaved"),
+      testId("dm-new-encrypted-doc"),
+    ) : null,
     menuItem(() => newDocMethods.importDocAndOpen(home), menuIcon("Import"), t("Import document"),
       dom.cls("disabled", !home.newDocWorkspace.get()),
       testId("dm-import"),

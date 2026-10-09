@@ -22,6 +22,7 @@ import { SUPPORT_EMAIL } from "app/gen-server/lib/homedb/HomeDBManager";
 import { isInstallAdminReq } from "app/server/lib/adminPageConfig";
 import { appSettings } from "app/server/lib/AppSettings";
 import { isAnonymousUser, isSingleUserMode, RequestWithLogin } from "app/server/lib/Authorizer";
+import { getEncryptionClientConfig } from "app/server/lib/encryption/encryptionConfig";
 import { RequestWithOrg } from "app/server/lib/extractOrg";
 import { GristServer } from "app/server/lib/GristServer";
 import {
@@ -169,6 +170,7 @@ export function makeGristConfig(options: MakeGristConfigOptions): GristLoadConfi
     userPresenceMaxUsers: getUserPresenceMaxUsers(),
     warnBeforeSharingPublicly: isAffirmative(process.env.GRIST_WARN_BEFORE_SHARING_PUBLICLY),
     helpUsImproveSurveyUrl: getHelpUsImproveSurveyUrl(),
+    encryption: getEncryptionClientConfig(),
   };
   return {
     ...config,

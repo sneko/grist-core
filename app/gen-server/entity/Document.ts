@@ -1,5 +1,6 @@
 import { ApiError } from "app/common/ApiError";
 import { DocumentUsage } from "app/common/DocUsage";
+import { DocEncryptionOptions } from "app/common/encryption/EncryptionTypes";
 import { Role } from "app/common/roles";
 import { DocReadOnlyReason, DocumentOptions, DocumentProperties, documentPropertyKeys, DocumentType,
   NEW_DOCUMENT_CODE } from "app/common/UserAPI";
@@ -11,6 +12,7 @@ import { User } from "app/gen-server/entity/User";
 import { Workspace } from "app/gen-server/entity/Workspace";
 import { nativeValues } from "app/gen-server/lib/values";
 
+import isEqual from "lodash/isEqual";
 import { Column, Entity, JoinColumn, ManyToOne, OneToMany, PrimaryColumn } from "typeorm";
 
 // Acceptable ids for use in document urls.
@@ -113,7 +115,29 @@ export class Document extends Resource {
   // associated workspace or org.
   //
   // These two properties are ignored by this method.
-  public updateFromProperties(props: Partial<DocumentProperties>) {
+  public updateFromProperties(props: Partial<DocumentProperties>, options: { isNew?: boolean } = {}) {
+    // End-to-end encryption is decided once and for all when a document is created: turning it
+    // off would have browsers send plaintext for a document its users believe is encrypted, and
+    // turning it on would leave the existing plaintext on the server.
+    const encryption = this.options?.encryption || null;
+    if (props.options?.encryption !== undefined) {
+      const wanted = props.options.encryption ? sanitizeEncryption(props.options.encryption) : null;
+      if (!options.isNew && !isEqual(wanted, encryption)) {
+        throw new ApiError("End-to-end encryption can only be chosen when creating a document", 400);
+      }
+    }
+    this._updateFromProperties(props);
+    const newEncryption = options.isNew ?
+      (props.options?.encryption ? sanitizeEncryption(props.options.encryption) : null) : encryption;
+    if (newEncryption) {
+      this.options = { ...this.options, encryption: newEncryption };
+    } else if (this.options?.encryption !== undefined) {
+      delete this.options.encryption;
+      if (Object.keys(this.options).length === 0) { this.options = null; }
+    }
+  }
+
+  private _updateFromProperties(props: Partial<DocumentProperties>) {
     super.updateFromProperties(props);
     if (props.isPinned !== undefined) { this.isPinned = props.isPinned; }
     if (props.urlId !== undefined) {
@@ -201,6 +225,13 @@ export class Document extends Resource {
       }
     }
   }
+}
+
+function sanitizeEncryption(encryption: DocEncryptionOptions): DocEncryptionOptions {
+  if (encryption.version !== 1) {
+    throw new ApiError("Unsupported end-to-end encryption version", 400);
+  }
+  return { version: 1 };
 }
 
 /**

@@ -1055,6 +1055,20 @@ export interface GristLoadConfig {
 
   // URL the quick-setup "Help us improve" survey POSTs to. Absent/empty = survey hidden.
   helpUsImproveSurveyUrl?: string;
+
+  // Set when end-to-end encrypted documents are enabled (see app/server/lib/encryption/encryptionConfig.ts).
+  encryption?: EncryptionClientConfig;
+}
+
+/**
+ * How browsers reach the encryption service holding users' keys, for end-to-end encrypted
+ * documents. With mockVault, a stand-in with a hardcoded key is used instead (tests only).
+ */
+export interface EncryptionClientConfig {
+  vaultUrl?: string;
+  interfaceUrl?: string;
+  mockVault?: boolean;
+  mockKey?: string;
 }
 
 /**
