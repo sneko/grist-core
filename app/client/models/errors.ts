@@ -3,6 +3,7 @@ import * as log from "app/client/lib/log";
 import { INotification, INotifyOptions, MessageType, Notifier } from "app/client/models/NotifyModel";
 import { ErrorTooltips } from "app/client/ui/GristTooltips";
 import { ApiErrorDetails } from "app/common/ApiError";
+import { isEncryptedDoc } from "app/common/encryption/EncryptionTypes";
 import { fetchFromHome, pageHasHome } from "app/common/urlUtils";
 
 import isError from "lodash/isError";
@@ -234,12 +235,16 @@ export function setUpErrorHandling(doReportError = reportError, koUtil?: any) {
 export function logError(error: unknown) {
   if (!pageHasHome()) { return; }
   const docId = G.window.gristDocPageModel?.currentDocId?.get();
+  // Errors in end-to-end encrypted documents may contain their content (e.g. errors from the
+  // data engine, which runs in the browser): the server mustn't get it.
+  const isEncrypted = isEncryptedDoc(G.window.gristDocPageModel?.currentDoc?.get());
   fetchFromHome("/api/log", {
     method: "POST",
     body: JSON.stringify({
       // Errors don't stringify, so pick out properties explicitly. Keep the shape fixed: the
       // server logs it as JSON, and log indexing needs each field to have a single type.
-      event: (error instanceof Error) ? pick(error, ["message", "stack", "status", "details"]) : { message: error },
+      event: isEncrypted ? { message: "Error in an end-to-end encrypted document (details withheld)" } :
+        (error instanceof Error) ? pick(error, ["message", "stack", "status", "details"]) : { message: error },
       docId,
       page: G.window.location.href,
       browser: pick(G.window.navigator, ["language", "platform", "userAgent"]),

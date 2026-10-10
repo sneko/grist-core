@@ -189,6 +189,7 @@ def create(call_external_js=None):
     def get(self, node, default=None):
       exempt = dict.get(self, node, default)
       if node in frozen:
+        # (Only looked up when the column is about to be recomputed, which costs as much.)
         table = eng.tables.get(node.table_id)
         rows = set(table.row_ids) if table else set()
         return rows.union(exempt) if exempt else rows
@@ -212,6 +213,20 @@ def create(call_external_js=None):
 
   scope_monitor = ScopeMonitor(eng)
 
+  def set_reserved_row_ids(table_id, row_ids):
+    """
+    Keeps new rows of a table from getting the given ids, even if no row has them anymore. In an
+    encrypted document, private columns are known by their row id in _grist_Tables_column (see
+    ScopeBinding in EncryptionTypes.ts): a new column mustn't get the id of a private column that
+    was removed, which would make it private too. (Undoing the removal still restores the column
+    with its id, and its privacy.)
+    """
+    # (Read by the patched Table.next_row_id, see _install_formula_lockdown.)
+    reserved = getattr(eng, '_reserved_row_ids', None)
+    if reserved is None:
+      reserved = eng._reserved_row_ids = {}  # pylint: disable=protected-access
+    reserved[table_id] = set(row_ids)
+
   def set_column_scopes(entries):
     """
     Sets which columns are private ([table_id, col_id, scopes] for each column whose values need
@@ -221,9 +236,53 @@ def create(call_external_js=None):
     scope_monitor.set_scopes(entries)
 
   for func in (load_meta_tables_repr, load_table_repr, fetch_all_tables, create_migrations_repr,
-               apply_doc_actions_exactly, calculate_exactly, set_frozen_columns, set_column_scopes):
+               apply_doc_actions_exactly, calculate_exactly, set_frozen_columns, set_column_scopes,
+               set_reserved_row_ids, export_xlsx):
     orig_register(func.__name__, func)
   return direct
+
+
+def export_xlsx(sheets):
+  """
+  Builds an Excel workbook, for exports of encrypted documents (which the server can't make):
+  sheets is a list of [name, header, rows], with rows of values (text, numbers, booleans, or
+  None). Returns the .xlsx file, base64-encoded (as marshalled bytes would reach the browser as
+  text).
+  """
+  # pylint: disable=import-outside-toplevel
+  import base64
+  import io
+  import openpyxl
+  from openpyxl.cell import WriteOnlyCell
+
+  workbook = openpyxl.Workbook(write_only=True)
+  used_titles = set()
+  for (name, header, rows) in sheets:
+    sheet = workbook.create_sheet(title=_sheet_title(name, used_titles))
+    for row in [header] + list(rows):
+      cells = []
+      for value in row:
+        cell = WriteOnlyCell(sheet, value=value)
+        if isinstance(value, str):
+          # Text is text, even when it looks like a spreadsheet formula.
+          cell.data_type = 's'
+        cells.append(cell)
+      sheet.append(cells)
+  out = io.BytesIO()
+  workbook.save(out)
+  return base64.b64encode(out.getvalue()).decode('ascii')
+
+
+def _sheet_title(name, used_titles):
+  # Excel limits sheet names to 31 characters, without some characters, and unique.
+  title = ''.join('_' if c in '[]:*?/\\' else c for c in (name or 'Sheet'))[:31] or 'Sheet'
+  base, n = title, 1
+  while title.lower() in used_titles:
+    n += 1
+    suffix = ' (%d)' % n
+    title = base[:31 - len(suffix)] + suffix
+  used_titles.add(title.lower())
+  return title
 
 
 def _get_formula_corrections(eng, doc_action_reprs):
@@ -393,6 +452,13 @@ def check_formula(formula):
       raise FormulaNotAllowed("global and nonlocal are not available")
     if isinstance(node, ast.Name):
       name = node.id
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+      # Defining special methods (e.g. __getattr__) is a way to get called by Python itself.
+      name = node.name
+    elif isinstance(node, ast.arg):
+      name = node.arg
+    elif isinstance(node, ast.keyword) and node.arg is not None:
+      name = node.arg
     elif isinstance(node, ast.Attribute):
       name = node.attr
       if name in ('format', 'format_map') and id(node) not in allowed_format_attrs:
@@ -459,6 +525,14 @@ def _install_formula_lockdown():
     return mod
   gencode.exec_module_text = exec_module_text
 
+  # Row ids reserved for an engine (see set_reserved_row_ids) are never given to new rows.
+  orig_next_row_id = table_module.Table.next_row_id
+  def next_row_id(self):
+    next_id = orig_next_row_id(self)
+    reserved = getattr(self._engine, '_reserved_row_ids', {}).get(self.table_id)
+    return max(next_id, max(reserved) + 1) if reserved else next_id
+  table_module.Table.next_row_id = next_row_id
+
   # UserTable.table is the engine's own Table object: formulas mustn't get it.
   def get_table(self):
     if _is_locked_down() and sys._getframe(1).f_code.co_filename == codebuilder.code_filename:
@@ -485,12 +559,14 @@ class ScopeMonitor(object):
   def __init__(self, eng):
     self._eng = eng
     self._scopes = {}     # (table_id, col_id) -> frozenset of scopes
+    self._node_scopes_cache = {}
     self._orig_use_node = eng._use_node
     self._orig_recompute_one_cell = eng._recompute_one_cell
 
   def set_scopes(self, entries):
     self._scopes = {(table_id, col_id): frozenset(scopes) for (table_id, col_id, scopes) in entries
                     if scopes}
+    self._node_scopes_cache = {}
     # Only check anything when there are private columns (_use_node is the engine's hot path).
     if self._scopes:
       self._eng._use_node = self._use_node
@@ -531,8 +607,16 @@ class ScopeMonitor(object):
     return self._scopes.get((node.table_id, node.col_id), frozenset())
 
   def _node_scopes(self, node):
-    return frozenset().union(*(self._scopes.get((node.table_id, c), frozenset())
-                               for c in self._columns_of(node)))
+    # Formulas read columns all the time (_use_node is the engine's hot path): remember results,
+    # except for summaries, whose group-by columns may change.
+    cached = self._node_scopes_cache.get(node)
+    if cached is not None:
+      return cached
+    scopes = frozenset().union(*(self._scopes.get((node.table_id, c), frozenset())
+                                 for c in self._columns_of(node)))
+    if not node.col_id.startswith('#summary#'):
+      self._node_scopes_cache[node] = scopes
+    return scopes
 
   def _first_private_col(self, node):
     for c in self._columns_of(node):

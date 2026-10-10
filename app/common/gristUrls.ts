@@ -1069,6 +1069,8 @@ export interface EncryptionClientConfig {
   interfaceUrl?: string;
   mockVault?: boolean;
   mockKey?: string;
+  // URL prefixes of custom widgets allowed in encrypted documents, besides those Grist serves.
+  allowedWidgets?: string[];
 }
 
 /**

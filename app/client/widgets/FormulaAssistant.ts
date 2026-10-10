@@ -44,8 +44,8 @@ export class FormulaAssistant extends Disposable {
   private _assistantExpanded = this.autoDispose(localStorageBoolObs(
     `u:${this._appModel.currentUser?.id ?? 0};formulaAssistantExpanded`, true));
 
-  /** Is assistant features are enabled */
-  private _assistantEnabled = getGristConfig().assistant?.version === 1;
+  /** Is assistant features are enabled (not for encrypted documents: it sends their content to an AI service) */
+  private _assistantEnabled = getGristConfig().assistant?.version === 1 && !this._gristDoc.docComm.isEncrypted;
   /** Preview column ref */
   private _transformColRef: string;
   /** Preview column id */

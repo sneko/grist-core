@@ -30,6 +30,11 @@
  * so they all skip the same changes, and keep the same document. (Checks only members holding a
  * column's key can make lock the values concerned instead, see ColumnPrivacy.ts.)
  *
+ * When a column is made public again, members holding its key share its values, in clear, with
+ * everyone (see _revealIfNeeded()). Until that's done, which any of them can do (it's retried
+ * whenever the document is opened or its keys change), snapshots aren't saved, as members
+ * without the key would otherwise save the values they had locked as the column's values.
+ *
  * The rest of the client sees nothing of this: it gets the same doc actions and action groups it
  * would get from the server for a regular document. This class has no browser dependencies, so
  * that it can be tested under Node; the engine, relay and vault are supplied by the caller.
@@ -38,20 +43,24 @@ import { LocalActionBundle } from "app/common/ActionBundle";
 import { ActionGroup, MinimalActionGroup } from "app/common/ActionGroup";
 import { summarizeAction } from "app/common/ActionSummarizer";
 import { createEmptyActionSummary } from "app/common/ActionSummary";
-import { ApplyUAOptions, ApplyUAResult, TableFetchResult } from "app/common/ActiveDocAPI";
-import { DocAction, getTableId, isSchemaAction, TableDataAction, UserAction } from "app/common/DocActions";
+import {
+  ApplyUAOptions, ApplyUAResult, QueryResult, ServerQuery, TableFetchResult,
+} from "app/common/ActiveDocAPI";
+import { CellValue, DocAction, getTableId, isSchemaAction, TableDataAction, UserAction } from "app/common/DocActions";
 import { DocData } from "app/common/DocData";
 import {
-  BlobTable, ChangePrivacy, checkSealing, ColumnPrivacy, EncryptionAccessError, sealActions, sealTables,
-  unsealActions, unsealTables,
+  BlobTable, ChangePrivacy, checkMetaAccess, checkSealing, ColumnPrivacy, EncryptionAccessError, hasPrivateMetaFields,
+  isLockedCell, metaCellScopes, MetaContext, MetaLookup, MetaRows, sealActions, sealTables, unsealActions,
+  unsealTables,
 } from "app/common/encryption/ColumnPrivacy";
+import { decryptFile, encryptFile, makeFileIdent, parseFileIdent } from "app/common/encryption/EncryptedAttachments";
 import {
   decryptBundle, decryptSnapshot, DocChangeBundle, DocSnapshotPayload, encryptBundle, encryptSnapshot,
 } from "app/common/encryption/EncryptedPayloads";
 import { base64ToBytes, bytesToBase64, KeyRecipient, sha256Hex } from "app/common/encryption/EncryptionCrypto";
 import {
-  Base64, DOC_SCOPE, EncryptedActionRecord, EncryptedDocOpenResult, EncryptedPushResult, EncryptionKeysResult,
-  EncryptionMember, makeKeyId, NewKeyRequest,
+  Base64, DOC_SCOPE, EncryptedActionRecord, EncryptedDocOpenResult, EncryptedPushResult, EncryptedSnapshotRecord,
+  EncryptionKeysResult, EncryptionMember, makeKeyId, NewKeyRequest,
 } from "app/common/encryption/EncryptionTypes";
 import { Keyring, MissingKeyError } from "app/common/encryption/Keyring";
 import { IDataEngine } from "app/common/encryption/PyodideEngine";
@@ -65,7 +74,12 @@ import isEqual from "lodash/isEqual";
 export interface IEncryptionRelay {
   fetchActions(afterActionNum: number): Promise<EncryptedActionRecord[]>;
   pushAction(baseActionNum: number, keyId: string, payload: Base64): Promise<EncryptedPushResult>;
-  saveSnapshot(actionNum: number, keyId: string, payload: Base64, options?: { compact?: boolean }): Promise<void>;
+  // Snapshots and files may be too big for a single message: the relay moves them by parts.
+  saveSnapshot(actionNum: number, keyId: string, payload: Uint8Array, options?: { compact?: boolean }): Promise<void>;
+  // The payload of a snapshot returned by opening the document, if it wasn't included.
+  fetchSnapshot(snapshot: EncryptedSnapshotRecord): Promise<Uint8Array>;
+  uploadFile(ciphertext: Uint8Array): Promise<{ fileId: string }>;
+  fetchFile(fileId: string): Promise<Uint8Array>;
   getKeys(): Promise<EncryptionKeysResult>;
   listMembers(): Promise<EncryptionMember[]>;
   createKey(request: NewKeyRequest): Promise<EncryptedPushResult>;
@@ -132,6 +146,17 @@ interface EngineResult {
 const MAX_PUSH_ATTEMPTS = 20;
 const TOO_FAST_ERROR = "Could not save change: the document is changing too fast, please retry";
 
+// How many cells to share at once when revealing the values of columns made public (and how
+// many times at most, in one go).
+const REVEAL_BATCH_CELLS = 5000;
+const MAX_REVEAL_BATCHES = 1000;
+
+// Formulas depending on the current time are updated hourly, by one member for all.
+const CURRENT_TIME_UPDATE_MS = 60 * 60 * 1000;
+
+/** Raised to stop retrying a push (see _retryOnConflict). */
+const CONFLICT = Symbol("conflict");
+
 export class LocalActiveDoc {
   /**
    * Loads a document from what the server returned on opening it: the latest snapshot and the
@@ -166,6 +191,13 @@ export class LocalActiveDoc {
   private _scopeEntries: [string, string, string[]][] = [];
   private _sealedCells = new SealedCells();
   private _memberLabels = new Map<number, string>();
+  // The document key the latest snapshot is encrypted with.
+  private _snapshotKeyId: string | null = null;
+  // When formulas depending on the current time were last updated (by anyone), as known here.
+  private _lastTimeUpdateMs = 0;
+  private _revealScheduled = false;
+  private _reservedColRefs: number[] = [];
+  private _nextQuerySubId = 1;
 
   private constructor(private _options: LocalActiveDocOptions) {
     this._engine = _options.engine;
@@ -204,6 +236,25 @@ export class LocalActiveDoc {
 
   public async fetchTable(tableId: string): Promise<TableFetchResult> {
     return this._exclusive(async () => ({ tableData: await this._engine.call("fetch_table", tableId) }));
+  }
+
+  /**
+   * Serves the rows of a table matching a query, as the server does for "on-demand" tables
+   * (which it doesn't load into its data engine). Here all tables are in the engine anyway: this
+   * just filters them. Every change gets to the client anyway, so there's no subscription to keep.
+   */
+  public async useQuerySet(query: ServerQuery): Promise<QueryResult> {
+    const { tableData } = await this.fetchTable(query.tableId);
+    const [, tableId, rowIds, columns] = tableData;
+    const filters = Object.entries(query.filters || {});
+    const kept: number[] = [];
+    for (const [i] of rowIds.entries()) {
+      if (filters.every(([colId, values]) => values.some(v => isEqual(v, columns[colId]?.[i])))) { kept.push(i); }
+      if (query.limit && kept.length >= query.limit) { break; }
+    }
+    const filtered: TableDataAction = ["TableData", tableId, kept.map(i => rowIds[i]),
+      Object.fromEntries(Object.entries(columns).map(([colId, values]) => [colId, kept.map(i => values[i])]))];
+    return { tableData: filtered, querySubId: this._nextQuerySubId++ };
   }
 
   public async applyUserActions(actions: UserAction[], options?: ApplyUAOptions): Promise<ApplyUAResult> {
@@ -287,7 +338,10 @@ export class LocalActiveDoc {
   public async updateCurrentTime(): Promise<void> {
     if (!this.canEdit) { return; }
     return this._exclusive(async () => {
+      // Every member's browser calls this: only one needs to do it.
+      if (Date.now() - this._lastTimeUpdateMs < CURRENT_TIME_UPDATE_MS) { return; }
       await this._applyAndPush([["UpdateCurrentTime"]], {}, { internal: true, skipIfEmpty: true });
+      this._lastTimeUpdateMs = Date.now();
     });
   }
 
@@ -298,7 +352,7 @@ export class LocalActiveDoc {
   public async createScopeKey(scope: string, recipients: (KeyRecipient & { userId: number })[],
     colRef?: number): Promise<string> {
     this._assertCanEdit();
-    return this._exclusive(() => this._createKey(scope, recipients, colRef));
+    return this._exclusive(async () => (await this._createKey(scope, recipients, colRef))!);
   }
 
   /**
@@ -309,19 +363,15 @@ export class LocalActiveDoc {
   public async releaseScope(scope: string): Promise<void> {
     this._assertCanEdit();
     return this._exclusive(async () => {
-      for (let attempt = 1; ; attempt++) {
+      await this._retryOnConflict(async () => {
         const result = await this._relay.releaseScope(scope, this._head);
-        if (result.accepted) {
-          const before = this._privacy;
-          this._head = result.actionNum;
-          await this._keyring.refresh();
-          await this._updatePrivacy();
-          await this._shareRevealedValues(before, this._privacy);
-          return;
-        }
-        await this._catchUp([]);
-        if (attempt >= MAX_PUSH_ATTEMPTS) { throw new Error(TOO_FAST_ERROR); }
-      }
+        if (!result.accepted) { return CONFLICT; }
+        this._head = result.actionNum;
+        await this._keyring.refresh();
+        await this._updatePrivacy();
+      });
+      // If this doesn't get done now, it gets done later (see _revealIfNeeded()).
+      await this._revealIfNeeded().catch(e => this._log("Could not share the values made public yet", e));
     });
   }
 
@@ -330,6 +380,7 @@ export class LocalActiveDoc {
     return this._exclusive(async () => {
       await this._keyring.refresh();
       await this._updatePrivacy();
+      await this._revealIfNeeded().catch(e => this._log("Could not share the values made public yet", e));
     });
   }
 
@@ -343,9 +394,12 @@ export class LocalActiveDoc {
 
   private async _load(openResult: EncryptedDocOpenResult) {
     if (openResult.snapshot) {
-      const snapshot = await decryptSnapshot(this._keyring, openResult.snapshot.keyId,
-        base64ToBytes(openResult.snapshot.payload));
+      const record = openResult.snapshot;
+      const payload = record.payload ? base64ToBytes(record.payload) : await this._relay.fetchSnapshot(record);
+      const snapshot = await decryptSnapshot(this._keyring, record.keyId, payload);
+      if (snapshot.actionNum !== record.actionNum) { throw new Error("Encrypted snapshot doesn't match the document"); }
       this._head = this._snapshotNum = snapshot.actionNum;
+      this._snapshotKeyId = record.keyId;
       await this._loadSnapshot(snapshot);
     } else if (openResult.actions.length > 0 || openResult.head > 0) {
       throw new Error("Encrypted document has changes but no snapshot to apply them to");
@@ -366,10 +420,12 @@ export class LocalActiveDoc {
     // Changes since the snapshot; there may be more on the server than were returned.
     await this._catchUp(openResult.actions);
 
-    if (this.canEdit && this._head - this._snapshotNum >= this._snapshotEvery()) {
-      await this._saveSnapshot();
-    }
     this._loading = false;
+    if (this.canEdit) {
+      // Values of columns made public may not have been shared yet.
+      await this._revealIfNeeded().catch(e => this._log("Could not share the values made public yet", e));
+      if (this._isSnapshotDue()) { await this._saveSnapshot(); }
+    }
   }
 
   private async _createNewDoc(settings: { timezone: string, locale: string }) {
@@ -445,6 +501,38 @@ export class LocalActiveDoc {
       await this._engine.call("set_column_scopes", entries);
       this._scopeEntries = entries;
     }
+    // Columns are made private by their row id: new columns mustn't get one of a removed private
+    // column (see set_reserved_row_ids in direct_sandbox.py).
+    const reserved = this._keyring.boundColRefs();
+    if (!isEqual(reserved, this._reservedColRefs)) {
+      await this._engine.call("set_reserved_row_ids", "_grist_Tables_column", reserved);
+      this._reservedColRefs = reserved;
+    }
+  }
+
+  /**
+   * What deciding which metadata cells are private needs (see ColumnPrivacy.metaCellScopes()),
+   * as of the latest change applied (the client's docData is updated after each change).
+   */
+  private _metaContext(lookup?: MetaLookup): MetaContext {
+    const fromDocData: MetaLookup = (tableId, rowId, colId) => this.docData?.getTable(tableId)?.getValue(rowId, colId);
+    return {
+      rows: new MetaRows(lookup || fromDocData),
+      keyScope: keyId => this._keyring.getKey(keyId)?.scope,
+    };
+  }
+
+  /**
+   * Pushes something to the history (calling tryOnce, which returns CONFLICT if the server
+   * refused it), catching up and retrying when others' changes got in first.
+   */
+  private async _retryOnConflict<T>(tryOnce: () => Promise<T | typeof CONFLICT>): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      const result = await tryOnce();
+      if (result !== CONFLICT) { return result; }
+      await this._catchUp([]);
+      if (attempt >= MAX_PUSH_ATTEMPTS) { throw new Error(TOO_FAST_ERROR); }
+    }
   }
 
   private async _exclusive<T>(callback: () => Promise<T>): Promise<T> {
@@ -463,10 +551,15 @@ export class LocalActiveDoc {
   /**
    * Applies user actions locally, and pushes the result to the server, retrying on top of
    * others' changes until accepted. Must be called while holding the mutex.
+   *
+   * A change is only ever shared once accepted by the server, which only accepts it on top of
+   * the latest change, and encrypted with the current document key. If someone else's change, or
+   * a new key, got in first, the change is undone locally, and computed again on top of the
+   * latest state (with the new key, if the member got it: otherwise, it fails).
    */
   private async _applyAndPush(actions: UserAction[], options: ApplyUAOptions,
     flags: { internal?: boolean, skipIfEmpty?: boolean } = {}): Promise<ApplyUAResult> {
-    for (let attempt = 1; ; attempt++) {
+    return this._retryOnConflict(async () => {
       if (!this._loading) { await this._rotateKeysIfNeeded(); }
       const result: EngineResult = await this._engine.call("apply_user_actions", actions, this._options.engineUser);
       const stored = result.stored.map(env => env[1]);
@@ -475,16 +568,18 @@ export class LocalActiveDoc {
         // Nothing changed, so there's nothing to share.
         return { actionNum: 0, actionHash: null, retValues: result.retValues, isModification: false };
       }
-      try {
-        this._privacy.checkChange(stored, scope => this._keyring.canUseScope(scope));
-      } catch (e) {
-        await this._revert(undo);
-        throw e;
-      }
       // The change may change which columns are private (e.g. new formulas using them): seal
       // values according to both the state before and after it.
       const privacy = stored.some(touchesColumns) ? await this._computePrivacy() : this._privacy;
       const changePrivacy = new ChangePrivacy(this._privacy, privacy);
+      const canUseScope = (scope: string) => this._keyring.canUseScope(scope);
+      try {
+        this._privacy.checkChange(stored, canUseScope);
+        checkMetaAccess([...stored, ...[...undo].reverse()], changePrivacy, this._metaContext(), canUseScope);
+      } catch (e) {
+        await this._revert(undo);
+        throw e;
+      }
       const bundle: DocChangeBundle = {
         v: 1,
         userActions: actions,
@@ -516,44 +611,56 @@ export class LocalActiveDoc {
         await this._catchUp([]).catch(err => this._log("Could not catch up after failed push", err));
         throw e;
       }
-      if (pushResult.accepted) {
-        const actionNum = pushResult.actionNum;
-        const actionHash = await sha256Hex(payload);
-        this._head = actionNum;
-        this._rowCount = result.rowCount.total;
-        this._sealedCells.applyActions(shared.stored);
-        if (privacy !== this._privacy) { await this._updatePrivacy(privacy); }
-        if (!flags.internal) { this._lastOwnActionNum = actionNum; }
-        this._remember({ actionNum, actionHash, bundle, fromSelf: true });
-        this._emit(bundle, stored, undo, result.retValues, { actionNum, actionHash, fromSelf: true });
-        this._maybeSnapshotSoon();
-        return { actionNum, actionHash, retValues: result.retValues, isModification: stored.length > 0 };
+      if (!pushResult.accepted) {
+        // Someone else's change got in first (or the document key changed). Undo ours, catch up,
+        // and try again.
+        this._log(`Push of change on top of ${this._head} refused (server at ${pushResult.head}), retrying`);
+        await this._revert(undo);
+        return CONFLICT;
       }
-      // Someone else's change got in first (or the document key changed). Undo ours, catch up,
-      // and try again.
-      this._log(`Push of change on top of ${this._head} refused (server at ${pushResult.head}), retrying`);
-      await this._revert(undo);
-      await this._catchUp([]);
-      if (attempt >= MAX_PUSH_ATTEMPTS) {
-        throw new Error("Could not save change: the document is changing too fast, please retry");
-      }
-    }
+      const actionNum = pushResult.actionNum;
+      const actionHash = await sha256Hex(payload);
+      this._head = actionNum;
+      this._rowCount = result.rowCount.total;
+      this._sealedCells.applyActions(shared.stored);
+      if (privacy !== this._privacy) { await this._updatePrivacy(privacy); }
+      if (!flags.internal) { this._lastOwnActionNum = actionNum; }
+      this._noteTimeUpdate(bundle);
+      this._remember({ actionNum, actionHash, bundle, fromSelf: true });
+      this._emit(bundle, stored, undo, result.retValues, { actionNum, actionHash, fromSelf: true });
+      this._maybeSnapshotSoon();
+      return { actionNum, actionHash, retValues: result.retValues, isModification: stored.length > 0 };
+    });
   }
 
-  /** Seals the private values of a change (to be numbered actionNum) with their keys. */
+  /**
+   * Seals the private values of a change (to be numbered actionNum) with their keys. Changes
+   * involving private values only share what can't reveal them in clear: the names of their user
+   * actions (whose arguments may be values), and only numbers as results.
+   */
   private async _sealChange(bundle: DocChangeBundle, privacy: ChangePrivacy, actionNum: number) {
-    return privacy.hasProtectedColumns() ? {
+    // Undo actions come after the change, so both are sealed with the same (continued) context.
+    // (They're listed in reverse order, as ApplyUndoActions takes them.)
+    const ctx = this._metaContext();
+    const stored = await sealActions(bundle.stored, privacy, this._keyring, actionNum, ctx);
+    const undo = (await sealActions([...bundle.undo].reverse(), privacy, this._keyring, actionNum, ctx)).reverse();
+    const sealedAny = stored.some((a, i) => a !== bundle.stored[i]) || undo.some((a, i) => a !== bundle.undo[i]);
+    if (!sealedAny && !privacy.hasProtectedColumns()) { return bundle; }
+    return {
       ...bundle,
-      stored: await sealActions(bundle.stored, privacy, this._keyring, actionNum),
-      undo: await sealActions(bundle.undo, privacy, this._keyring, actionNum),
-      // User actions may include private values too. Others only use their names.
+      stored,
+      undo,
       userActions: bundle.userActions.map(a => a.slice(0, 1) as UserAction),
-    } : bundle;
+      retValues: bundle.retValues.map(onlyNumbers),
+      info: { ...bundle.info, desc: undefined },
+    };
   }
 
+  /** Undoes a change applied locally (not shared), restoring formula values exactly. */
   private async _revert(undo: DocAction[]) {
     if (undo.length === 0) { return; }
-    await this._engine.call("apply_user_actions", [["ApplyUndoActions", undo]], this._options.engineUser);
+    // (Undo actions are listed in reverse order, as ApplyUndoActions takes them.)
+    await this._engine.call("apply_doc_actions_exactly", [...undo].reverse(), this._options.engineUser);
   }
 
   /**
@@ -562,15 +669,22 @@ export class LocalActiveDoc {
    */
   private async _catchUp(records: EncryptedActionRecord[]) {
     let pending = records.filter(r => r.actionNum > this._head).sort((a, b) => a.actionNum - b.actionNum);
-    if (records.length === 0 || (pending.length > 0 && pending[0].actionNum !== this._head + 1)) {
-      // Either asked to sync, or there is a gap: get everything after our head.
+    if (records.length === 0) {
+      // Asked to sync: get everything after our head.
       pending = await this._fetchAllAfter(this._head);
     }
-    for (const record of pending) {
+    for (let i = 0; i < pending.length; i++) {
+      const record = pending[i];
       if (record.actionNum <= this._head) { continue; }
       if (record.actionNum !== this._head + 1) {
-        // The server pruned changes we missed (they are covered by snapshots).
-        throw new NeedsReloadError("This document changed too much while you were away: please reload it");
+        // We missed some changes (e.g. while disconnected): get them, with all that follow.
+        pending = await this._fetchAllAfter(this._head);
+        if (pending[0]?.actionNum !== this._head + 1) {
+          // The server pruned changes we missed (they are covered by snapshots).
+          throw new NeedsReloadError("This document changed too much while you were away: please reload it");
+        }
+        i = -1;
+        continue;
       }
       await this._applyRemote(record);
     }
@@ -580,9 +694,13 @@ export class LocalActiveDoc {
     const result: EncryptedActionRecord[] = [];
     for (;;) {
       const batch = await this._relay.fetchActions(actionNum);
-      result.push(...batch);
       if (batch.length === 0) { return result; }
-      actionNum = batch[batch.length - 1].actionNum;
+      // Each batch must move forward, in order (or we'd never be done).
+      for (const record of batch) {
+        if (!(record.actionNum > actionNum)) { throw new Error("Invalid changes received from the server"); }
+        actionNum = record.actionNum;
+        result.push(record);
+      }
     }
   }
 
@@ -593,6 +711,7 @@ export class LocalActiveDoc {
       await this._keyring.refresh();
       this._head = record.actionNum;
       await this._updatePrivacy();
+      this._maybeRevealSoon();
       return;
     }
     const payload = base64ToBytes(record.payload);
@@ -622,7 +741,7 @@ export class LocalActiveDoc {
     const privacy = stored.some(touchesColumns) ? await this._computePrivacy() : this._privacy;
     try {
       checkSealing(bundle.stored, new ChangePrivacy(this._privacy, privacy),
-        scope => this._keyring.keyIdAt(scope, record.actionNum));
+        scope => this._keyring.keyIdAt(scope, record.actionNum), this._metaContext());
     } catch (e) {
       await this._revert(undo);
       return this._skipChange(record, e);
@@ -636,39 +755,142 @@ export class LocalActiveDoc {
     // The author is the one the server says made the change.
     const info = { ...bundle.info, user: await this._memberLabel(record.userId) };
     const localBundle: DocChangeBundle = { ...bundle, info, stored, undo };
+    this._noteTimeUpdate(bundle);
     this._remember({ actionNum: record.actionNum, actionHash, bundle: localBundle, fromSelf: false });
     this._emit(localBundle, localStored, undo, bundle.retValues,
       { actionNum: record.actionNum, actionHash, fromSelf: false });
   }
 
-  /** Shares the values of columns that were private and no longer are, with everyone. */
-  private async _shareRevealedValues(before: ColumnPrivacy, after: ColumnPrivacy) {
-    const revealed = before.scopeEntries().filter(([tableId, colId]) => after.scopesOf(tableId, colId).length === 0);
-    for (let attempt = 1; ; attempt++) {
-      const stored: DocAction[] = [];
-      for (const [tableId, colId] of revealed) {
-        const tableData: TableDataAction | null = await this._engine.call("fetch_table", tableId).catch(() => null);
-        if (tableData && tableData[2].length > 0 && tableData[3][colId]) {
-          stored.push(["BulkUpdateRecord", tableId, tableData[2], { [colId]: tableData[3][colId] }]);
-        }
-      }
-      if (stored.length === 0) { return; }
-      // The engine has these values already: share them as they are.
-      const bundle: DocChangeBundle = {
-        v: 1, userActions: [["Calculate"]], stored, undo: [], retValues: [null], internal: true,
-        info: { time: Date.now(), user: this._options.userName, inst: "encrypted", otherId: 0, linkId: 0 },
-      };
-      const payload = await encryptBundle(this._keyring, this._keyring.currentKeyId(DOC_SCOPE), bundle);
-      const result = await this._relay.pushAction(this._head, this._keyring.currentKeyId(DOC_SCOPE),
-        bytesToBase64(payload));
-      if (result.accepted) {
+  private _noteTimeUpdate(bundle: DocChangeBundle) {
+    if (getPrimaryAction(bundle) === "UpdateCurrentTime") {
+      this._lastTimeUpdateMs = Math.max(this._lastTimeUpdateMs, bundle.info.time);
+    }
+  }
+
+  private _maybeRevealSoon() {
+    if (this._loading || !this.canEdit || this._revealScheduled) { return; }
+    this._revealScheduled = true;
+    setTimeout(() => {
+      this._revealScheduled = false;
+      if (this._closed) { return; }
+      this._exclusive(() => this._revealIfNeeded())
+        .catch(e => this._log("Could not share the values made public yet", e));
+    }, 0);
+  }
+
+  /**
+   * Shares, with everyone, values that were private and no longer are (columns made public, and
+   * formulas that were private because of them), as far as this member can read them: until
+   * then, members who couldn't read them still have them locked. Attachments of such columns
+   * get their keys replaced with ones everyone can use. Holds the mutex.
+   */
+  private async _revealIfNeeded() {
+    if (!this.canEdit || !this._keyring.canUseScope(DOC_SCOPE)) { return; }
+    for (let batch = 0; batch < MAX_REVEAL_BATCHES; batch++) {
+      const done = await this._retryOnConflict(async () => {
+        // (Computed again after catching up: what's left to share may have changed.)
+        const stored = await this._nextReveal();
+        if (stored.length === 0) { return true; }
+        const bundle: DocChangeBundle = {
+          v: 1, userActions: [["Calculate"]], stored, undo: [], retValues: [null], internal: true,
+          info: { time: Date.now(), user: this._options.userName, inst: "encrypted", otherId: 0, linkId: 0 },
+        };
+        const keyId = this._keyring.currentKeyId(DOC_SCOPE);
+        const payload = await encryptBundle(this._keyring, keyId, bundle);
+        const result = await this._relay.pushAction(this._head, keyId, bytesToBase64(payload));
+        if (!result.accepted) { return CONFLICT; }
         this._head = result.actionNum;
         this._sealedCells.applyActions(stored);
-        return;
-      }
-      await this._catchUp([]);
-      if (attempt >= MAX_PUSH_ATTEMPTS) { throw new Error(TOO_FAST_ERROR); }
+        // Our own engine has these values already; only attachments' new keys are new to it.
+        const fileUpdates = stored.filter(a => a[1] === "_grist_Attachments");
+        if (fileUpdates.length > 0) {
+          await this._engine.call("apply_doc_actions_exactly", fileUpdates, this._options.engineUser);
+          this._emit(bundle, fileUpdates, [], [null],
+            { actionNum: result.actionNum, actionHash: await sha256Hex(payload), fromSelf: true });
+        }
+        return false;
+      });
+      if (done) { return; }
     }
+  }
+
+  /** The next batch of values to reveal (see _revealIfNeeded()), as doc actions. */
+  private async _nextReveal(): Promise<DocAction[]> {
+    const ctx = this._metaContext();
+    let tableCache: { tableId: string, data: TableDataAction } | null = null;
+    const getTable = async (tableId: string) => {
+      if (tableCache?.tableId !== tableId) {
+        tableCache = { tableId, data: await this._engine.call("fetch_table", tableId) };
+      }
+      return tableCache.data;
+    };
+    for (const [tableId, colId] of this._sealedCells.sealedColumns()) {
+      const isMeta = tableId.startsWith("_grist");
+      if (isMeta ? !hasPrivateMetaFields(tableId) :
+        (!this._privacy.getColumn(tableId, colId) || this._privacy.scopesOf(tableId, colId).length > 0)) {
+        continue;
+      }
+      const rowIds: number[] = [];
+      const values: CellValue[] = [];
+      for (const rowId of this._sealedCells.sealedRows(tableId, colId)) {
+        if (isMeta && metaCellScopes(this._privacy, ctx, tableId, colId, rowId).length > 0) { continue; }
+        let value: CellValue | undefined;
+        if (isMeta) {
+          value = this.docData.getTable(tableId)?.getValue(rowId, colId);
+        } else {
+          const data = await getTable(tableId);
+          const index = data[2].indexOf(rowId);
+          value = index >= 0 ? data[3][colId]?.[index] : undefined;
+        }
+        if (value === undefined || isLockedCell(value)) { continue; }   // Others will share it.
+        rowIds.push(rowId);
+        values.push(value);
+        if (rowIds.length >= REVEAL_BATCH_CELLS) { break; }
+      }
+      if (rowIds.length > 0) { return [["BulkUpdateRecord", tableId, rowIds, { [colId]: values }]]; }
+    }
+    return this._nextAttachmentReveal();
+  }
+
+  /**
+   * Attachments of columns made public have their file's key wrapped with the column's key: a
+   * batch of them re-encrypted with the document's key, as doc actions (or none if none's left).
+   */
+  private async _nextAttachmentReveal(): Promise<DocAction[]> {
+    const released = new Set(this._keyring.releasedScopes());
+    if (released.size === 0) { return []; }
+    const attachments = this.docData.getMetaTable("_grist_Attachments");
+    const updates: { rowId: number, fileIdent: string }[] = [];
+    for (const record of attachments.getRecords()) {
+      const ref = parseFileIdent(record.fileIdent);
+      const scope = ref && this._keyring.getKey(ref.keyId)?.scope;
+      if (!ref || !scope || !released.has(scope) || !this._keyring.holds(ref.keyId)) { continue; }
+      const data = await decryptFile(this._keyring, ref, await this._relay.fetchFile(ref.fileId));
+      const { ciphertext, ref: newRef } = await encryptFile(this._keyring, DOC_SCOPE, data);
+      const { fileId } = await this._relay.uploadFile(ciphertext);
+      updates.push({ rowId: record.id, fileIdent: makeFileIdent({ fileId, ...newRef }) });
+      if (updates.length >= 20) { break; }
+    }
+    if (updates.length === 0) { return []; }
+    const rowIds = updates.map(u => u.rowId);
+    const values = (colId: string) => rowIds.map(rowId => attachments.getValue(rowId, colId as any) as CellValue);
+    return [["BulkUpdateRecord", "_grist_Attachments", rowIds, {
+      fileIdent: updates.map(u => u.fileIdent),
+      fileName: values("fileName"), fileSize: values("fileSize"),
+      imageWidth: values("imageWidth"), imageHeight: values("imageHeight"),
+    }]];
+  }
+
+  /** Whether some values made public haven't been shared with everyone yet (see _revealIfNeeded()). */
+  private _hasUnrevealedValues(): boolean {
+    const ctx = this._metaContext();
+    return this._sealedCells.sealedColumns().some(([tableId, colId]) => {
+      if (tableId.startsWith("_grist")) {
+        return hasPrivateMetaFields(tableId) && this._sealedCells.sealedRows(tableId, colId)
+          .some(rowId => metaCellScopes(this._privacy, ctx, tableId, colId, rowId).length === 0);
+      }
+      return Boolean(this._privacy.getColumn(tableId, colId)) && this._privacy.scopesOf(tableId, colId).length === 0;
+    });
   }
 
   /**
@@ -701,9 +923,13 @@ export class LocalActiveDoc {
     return this._memberLabels.get(userId) ?? `#${userId}`;
   }
 
-  /** Creates a new key for a scope, recorded after the latest change. Holds the mutex. */
+  /**
+   * Creates a new key for a scope, recorded after the latest change. If `replacing` is given,
+   * that's the key it replaces: if someone else replaced it meanwhile, returns null. Holds the
+   * mutex.
+   */
   private async _createKey(scope: string, recipients: (KeyRecipient & { userId: number })[],
-    colRef?: number): Promise<string> {
+    colRef?: number, replacing?: string): Promise<string | null> {
     const wraps = await this._keyring.vault.createDocumentKey(recipients);
     const keyId = makeKeyId(scope);
     const request: NewKeyRequest = {
@@ -716,18 +942,16 @@ export class LocalActiveDoc {
       baseActionNum: this._head,
       ...(colRef ? { colRef } : {}),
     };
-    for (let attempt = 1; ; attempt++) {
+    return this._retryOnConflict(async () => {
+      if (replacing && this._keyring.currentKey(scope)?.keyId !== replacing) { return null; }
       request.baseActionNum = this._head;
       const result = await this._relay.createKey(request);
-      if (result.accepted) {
-        this._head = result.actionNum;
-        await this._keyring.refresh();
-        await this._updatePrivacy();
-        return keyId;
-      }
-      await this._catchUp([]);
-      if (attempt >= MAX_PUSH_ATTEMPTS) { throw new Error("Could not create key: the document is changing too fast"); }
-    }
+      if (!result.accepted) { return CONFLICT; }
+      this._head = result.actionNum;
+      await this._keyring.refresh();
+      await this._updatePrivacy();
+      return keyId;
+    });
   }
 
   /**
@@ -747,15 +971,15 @@ export class LocalActiveDoc {
         .filter(r => r.vaultUserId);
       this._log(`Replacing the key of ${scope}, for ${recipients.length} member(s)`);
       try {
-        await this._createKey(scope, recipients);
+        await this._createKey(scope, recipients, undefined, current.keyId);
       } catch (e) {
         // Someone else may have replaced it first.
         await this._keyring.refresh();
         if (this._keyring.currentKey(scope)?.keyId === current.keyId) { throw e; }
       }
     }
-    // Re-encrypt the document with the new keys, dropping what the server had with the old ones.
-    await this._saveSnapshot({ compact: true });
+    // Save the document under the new keys (members given only the new ones can then open it).
+    await this._saveSnapshot();
   }
 
   private _remember(entry: HistoryEntry) {
@@ -777,8 +1001,15 @@ export class LocalActiveDoc {
     });
   }
 
+  /** Whether a new snapshot should be saved: after enough changes, or under a new key. */
+  private _isSnapshotDue(): boolean {
+    if (this._head - this._snapshotNum >= this._snapshotEvery()) { return true; }
+    const keyId = this._keyring.currentKey(DOC_SCOPE)?.keyId;
+    return Boolean(keyId && this._snapshotKeyId && keyId !== this._snapshotKeyId);
+  }
+
   private _maybeSnapshotSoon() {
-    if (this._head - this._snapshotNum < this._snapshotEvery()) { return; }
+    if (!this._isSnapshotDue()) { return; }
     // Don't hold up the change that triggered it.
     setTimeout(() => {
       if (this._closed) { return; }
@@ -789,18 +1020,31 @@ export class LocalActiveDoc {
   /**
    * Saves a snapshot. Private columns the member can't read are given by reference to the sealed
    * values the member received (see SealedCells.ts); if that's not possible (e.g. a column just
-   * became private), the snapshot is left for others to make.
+   * became private), the snapshot is left for others to make. So it is while values made public
+   * haven't been shared yet (see _revealIfNeeded()).
    */
   private async _saveSnapshot(options: { compact?: boolean } = {}) {
     if (!this._keyring.canUseScope(DOC_SCOPE)) { return; }
-    if (this._snapshotNum === this._head && this._head > 0 && !options.compact) { return; }
-    const tables = await this._engine.call("fetch_all_tables");
+    const keyId = this._keyring.currentKeyId(DOC_SCOPE);
+    if (this._snapshotNum === this._head && this._head > 0 && !options.compact && this._snapshotKeyId === keyId) {
+      return;
+    }
+    if (this._hasUnrevealedValues()) {
+      this._log("Leaving the snapshot until values made public are shared");
+      return;
+    }
+    const tables: { [tableId: string]: TableDataAction } = await this._engine.call("fetch_all_tables");
     const blobs = new BlobTable();
     let sealed: { [tableId: string]: any };
     try {
-      sealed = await sealTables(tables, this._privacy, this._keyring, this._head, blobs,
-        (tableId, colId, rowIds, values) => this._sealedCells.export(tableId, colId,
-          this._privacy.getColumn(tableId, colId)?.type || "Any", rowIds, values, blobs));
+      // Which metadata cells are private is decided by the snapshot's own metadata.
+      const ctx = this._metaContext((tableId, rowId, colId) => {
+        const table = tables[tableId];
+        const index = table ? table[2].indexOf(rowId) : -1;
+        return index >= 0 ? table[3][colId]?.[index] : undefined;
+      });
+      sealed = await sealTables(tables, this._privacy, this._keyring, this._head, blobs, ctx,
+        this._sealedCells.makeCarrier((tableId, colId) => this._privacy.getColumn(tableId, colId)?.type || "Any"));
     } catch (e) {
       if (!(e instanceof CannotCarryError)) { throw e; }
       this._log("Leaving the snapshot to members who can read all columns:", e.message);
@@ -812,10 +1056,12 @@ export class LocalActiveDoc {
       tables: sealed,
       ...(blobs.blobs.length > 0 ? { blobs: blobs.blobs } : {}),
     };
-    const keyId = this._keyring.currentKeyId(DOC_SCOPE);
     const payload = await encryptSnapshot(this._keyring, keyId, snapshot);
-    await this._relay.saveSnapshot(snapshot.actionNum, keyId, bytesToBase64(payload), options);
+    await this._relay.saveSnapshot(snapshot.actionNum, keyId, payload, options);
     this._snapshotNum = snapshot.actionNum;
+    this._snapshotKeyId = keyId;
+    // That's how the document is shared now (e.g. with values sealed that weren't before).
+    this._sealedCells.loadSnapshot(sealed, blobs.blobs);
   }
 }
 
@@ -823,6 +1069,13 @@ export class LocalActiveDoc {
 function touchesColumns(action: DocAction): boolean {
   const tableId = getTableId(action);
   return tableId === "_grist_Tables_column" || tableId === "_grist_Tables" || isSchemaAction(action);
+}
+
+// What can be shared of a user action's result, in changes involving private values.
+function onlyNumbers(value: any): any {
+  if (value === null || typeof value === "number" || typeof value === "boolean") { return value; }
+  if (Array.isArray(value) && value.every(v => v === null || typeof v === "number")) { return value; }
+  return null;
 }
 
 function getPrimaryAction(bundle: DocChangeBundle): string {

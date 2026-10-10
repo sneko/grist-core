@@ -4,14 +4,15 @@
  * whole document. Their snapshots give the values of those columns by reference to the sealed
  * values they received (CarriedValues), which they can pass on without being able to read them;
  * readers check that each sealed value belongs to its cell. This is the document's previous state
- * patched with the changes since, for the cells the member can't read.
+ * patched with the changes since, for the cells the member can't read (including private
+ * metadata cells, sealed one by one).
  *
  * This follows the changes as they apply to the document (rows added and removed, columns and
  * tables renamed or removed), in the form they were shared in (with sealed values).
  */
 import { CellValue } from "app/common/DocActions";
 import {
-  BlobTable, CarriedValues, isCarried, isSealed, SealedBlob,
+  BlobTable, CarriedValues, isCarried, isSealed, SealedBlob, SnapshotCarrier,
 } from "app/common/encryption/ColumnPrivacy";
 import { isLockedCell } from "app/common/encryption/LockedCell";
 import { getDefaultForType } from "app/common/gristTypes";
@@ -48,6 +49,11 @@ export class SealedCells {
           values.carried.refs.forEach((ref, i) => {
             if (ref && blobs[ref[0]]) { cells.set(rowIds[i], { blob: blobs[ref[0]], pos: ref[1] }); }
           });
+        } else if (Array.isArray(values)) {
+          // Metadata cells, sealed one by one.
+          values.forEach((value, i) => {
+            if (isSealed(value)) { this._column(tableId, colId).set(rowIds[i], { blob: value.sealed, pos: 0 }); }
+          });
         }
       }
     }
@@ -56,6 +62,27 @@ export class SealedCells {
   /** Follows the doc actions of a change (in their shared form, with sealed values). */
   public applyActions(actions: any[]) {
     for (const action of actions) { this._applyAction(action); }
+  }
+
+  /** The sealed value received for a cell, if any. */
+  public getCell(tableId: string, colId: string, rowId: number): CellRef | undefined {
+    return this._tables.get(tableId)?.get(colId)?.get(rowId);
+  }
+
+  /** The rows of a column that have sealed values. */
+  public sealedRows(tableId: string, colId: string): number[] {
+    return [...(this._tables.get(tableId)?.get(colId)?.keys() || [])];
+  }
+
+  /** The columns with sealed values, as [tableId, colId] pairs. */
+  public sealedColumns(): [string, string][] {
+    const result: [string, string][] = [];
+    for (const [tableId, table] of this._tables) {
+      for (const [colId, cells] of table) {
+        if (cells.size > 0) { result.push([tableId, colId]); }
+      }
+    }
+    return result;
   }
 
   /**
@@ -85,6 +112,16 @@ export class SealedCells {
     return { carried: { refs, plain } };
   }
 
+  /** What sealing a snapshot needs (see ColumnPrivacy.sealTables()), given column types. */
+  public makeCarrier(colType: (tableId: string, colId: string) => string): SnapshotCarrier {
+    return {
+      carryColumn: (tableId, colId, rowIds, values, blobs) =>
+        this.export(tableId, colId, colType(tableId, colId), rowIds, values, blobs),
+      sealedCell: (tableId, colId, rowId) => this.getCell(tableId, colId, rowId),
+      cannotCarry: (message) => { throw new CannotCarryError(message); },
+    };
+  }
+
   private _column(tableId: string, colId: string): Map<number, CellRef> {
     let table = this._tables.get(tableId);
     if (!table) { this._tables.set(tableId, table = new Map()); }
@@ -111,13 +148,21 @@ export class SealedCells {
           }
         }
         for (const [colId, values] of Object.entries(columns)) {
-          if (isSealed(values)) {
+          if (isSealed(values) && !(single && tableId.startsWith("_grist"))) {
             const cells = this._column(tableId, colId);
             rowIds.forEach((rowId, pos) => cells.set(rowId, { blob: values.sealed, pos }));
-          } else {
-            const cells = this._tables.get(tableId)?.get(colId);
-            if (cells) { for (const rowId of rowIds) { cells.delete(rowId); } }
+            continue;
           }
+          // Metadata cells are sealed one by one; other values are in clear.
+          const cellValues: unknown[] = single ? [values] : (Array.isArray(values) ? values : []);
+          rowIds.forEach((rowId, i) => {
+            const value = cellValues[i];
+            if (isSealed(value)) {
+              this._column(tableId, colId).set(rowId, { blob: value.sealed, pos: 0 });
+            } else {
+              this._tables.get(tableId)?.get(colId)?.delete(rowId);
+            }
+          });
         }
         break;
       }

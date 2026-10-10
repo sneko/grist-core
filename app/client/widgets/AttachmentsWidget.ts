@@ -1,5 +1,6 @@
 import * as commands from "app/client/components/commands";
 import { FormFieldRulesConfig } from "app/client/components/Forms/FormConfig";
+import { guardDocApi } from "app/client/encryption/serverDataGuard";
 import { dragOverClass } from "app/client/lib/dom";
 import { stopEvent } from "app/client/lib/domUtils";
 import { makeT } from "app/client/lib/localization";
@@ -312,8 +313,8 @@ export class AttachmentsWidget extends NewAbstractWidget {
   // access-agnostic, and the real gating is on the WebSocket calls that follow.
   private get _docApi() {
     const docComm = this._getDocComm();
-    return new DocAPIImpl(docUrl(docComm.docWorkerUrl), docComm.docId,
-      { propagateViewAs: true });
+    return guardDocApi(new DocAPIImpl(docUrl(docComm.docWorkerUrl), docComm.docId,
+      { propagateViewAs: true }), docComm.isEncrypted);
   }
 }
 

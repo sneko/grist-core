@@ -4,7 +4,7 @@
  * parsed in the browser, by the same parsers (those of the data engine, which runs there), and
  * added as new tables like the server would.
  */
-import { ApplyUAResult } from "app/common/ActiveDocAPI";
+import { ApplyUAOptions, ApplyUAResult } from "app/common/ActiveDocAPI";
 import { CellValue, UserAction } from "app/common/DocActions";
 import { DocData } from "app/common/DocData";
 import { IMPORT_DIR } from "app/common/encryption/PyodideEngine";
@@ -12,6 +12,9 @@ import { localTimestampToUTC } from "app/common/RelativeDates";
 import { guessColInfoForImports } from "app/common/ValueGuesser";
 import { ParseFileResult } from "app/plugin/FileParserAPI";
 import { GristColumn } from "app/plugin/GristTable";
+
+// Rows are added by batches of this many, so that each change stays reasonably small.
+const IMPORT_BATCH_ROWS = 5000;
 
 /** The engine features needed to parse files. */
 export interface ImportEngine {
@@ -49,24 +52,33 @@ export async function parseFileLocally(engine: ImportEngine, fileName: string,
 
 /**
  * Adds parsed tables to the document, as new tables, guessing column types as the server does
- * for imports (see ActiveDocImport). Returns the ids of the new tables.
+ * for imports (see ActiveDocImport). Rows are added by batches, as changes linked together (so
+ * that they're undone together). Returns the ids of the new tables.
  */
 export async function addParsedTables(
   parsed: ParseFileResult, fileName: string, docData: DocData,
-  applyUserActions: (actions: UserAction[]) => Promise<ApplyUAResult>,
+  applyUserActions: (actions: UserAction[], options?: ApplyUAOptions) => Promise<ApplyUAResult>,
 ): Promise<string[]> {
   const tableIds: string[] = [];
   const baseName = fileName.replace(/\.[^.]*$/, "").trim() || "Imported";
+  let linkId = 0;
+  const apply = async (actions: UserAction[]) => {
+    const result = await applyUserActions(actions, linkId ? { linkId } : {});
+    linkId = result.actionNum || linkId;
+    return result;
+  };
   for (const table of parsed.tables) {
     const tableData = table.table_data.map(col => [...col]) as CellValue[][];
     const columns = cleanColumns(table.column_metadata, tableData, docData);
     const name = table.table_name ? `${baseName} - ${table.table_name}` : baseName;
-    const added = await applyUserActions([["AddTable", toTableId(name), columns]]);
+    const added = await apply([["AddTable", toTableId(name), columns]]);
     const { table_id: tableId, columns: colIds } = added.retValues[0];
     const numRows = tableData[0]?.length || 0;
-    if (numRows > 0) {
-      const values = Object.fromEntries(colIds.map((colId: string, i: number) => [colId, tableData[i]]));
-      await applyUserActions([["BulkAddRecord", tableId, new Array(numRows).fill(null), values]]);
+    for (let start = 0; start < numRows; start += IMPORT_BATCH_ROWS) {
+      const end = Math.min(numRows, start + IMPORT_BATCH_ROWS);
+      const values = Object.fromEntries(colIds.map((colId: string, i: number) =>
+        [colId, tableData[i].slice(start, end)]));
+      await apply([["BulkAddRecord", tableId, new Array(end - start).fill(null), values]]);
     }
     tableIds.push(tableId);
   }

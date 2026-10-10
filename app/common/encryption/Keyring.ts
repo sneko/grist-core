@@ -8,6 +8,8 @@ import {
   DOC_SCOPE, DocKeyInfo, DocKeyRecord, EncryptionKeysResult, ScopeBinding,
 } from "app/common/encryption/EncryptionTypes";
 
+const MIN_REFRESH_INTERVAL_MS = 5000;
+
 export class MissingKeyError extends Error {
   constructor(public readonly keyId: string) {
     super("You don't have access to the key needed to read this content");
@@ -18,6 +20,8 @@ export class Keyring {
   private _keys = new Map<string, DocKeyInfo>();
   private _myKeys = new Map<string, WrappedKey>();
   private _bindings: ScopeBinding[] = [];
+  private _lastRefreshMs = 0;
+  private _refreshing?: Promise<void>;
 
   constructor(
     public readonly vault: IKeyVault,
@@ -35,7 +39,21 @@ export class Keyring {
   }
 
   public async refresh() {
+    this._lastRefreshMs = Date.now();
     this.update(await this._fetchKeys());
+  }
+
+  /**
+   * Refreshes keys if some of the given ones aren't known yet (e.g. just created by another
+   * member). Content asking for unknown keys may also be bogus: this refreshes at most once every
+   * few seconds.
+   */
+  public async refreshIfUnknown(keyIds: string[]): Promise<void> {
+    if (keyIds.every(keyId => this._keys.has(keyId))) { return; }
+    if (this._refreshing) { return this._refreshing; }
+    if (Date.now() - this._lastRefreshMs < MIN_REFRESH_INTERVAL_MS) { return; }
+    this._refreshing = this.refresh().finally(() => { this._refreshing = undefined; });
+    return this._refreshing;
   }
 
   public getKeys(): DocKeyInfo[] {
@@ -76,6 +94,17 @@ export class Keyring {
     return new Map(this._bindings
       .filter(b => b.boundAt <= actionNum && (b.releasedAt === null || b.releasedAt > actionNum))
       .map(b => [b.colRef, b.scope]));
+  }
+
+  /** The columns that are or were private (whose ids mustn't be given to new columns). */
+  public boundColRefs(): number[] {
+    return [...new Set(this._bindings.map(b => b.colRef))].sort((a, b) => a - b);
+  }
+
+  /** Column scopes that were made public again (and aren't used anymore). */
+  public releasedScopes(): string[] {
+    const active = new Set(this._bindings.filter(b => b.releasedAt === null).map(b => b.scope));
+    return [...new Set(this._bindings.filter(b => b.releasedAt !== null && !active.has(b.scope)).map(b => b.scope))];
   }
 
   /** The scope protecting a column now, if it's private. */

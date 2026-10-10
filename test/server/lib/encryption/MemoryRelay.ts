@@ -1,9 +1,10 @@
 /**
  * An in-memory stand-in for the server side of encrypted documents, for tests of the browser-side
  * logic. It follows the same rules as the real relay (see EncryptionRelay.ts): changes are
- * accepted only on top of the latest one and with the current document key, keys are recorded in
- * the history, and members only get the keys they're given.
+ * accepted only on top of the latest one, with the current document key, and from members holding
+ * it; keys are recorded in the history, and members only get the keys they're given.
  */
+import { base64ToBytes, bytesToBase64 } from "app/common/encryption/EncryptionCrypto";
 import {
   Base64, DOC_SCOPE, DocKeyInfo, DocKeyRecord, EncryptedActionRecord, EncryptedDocOpenResult,
   EncryptedPushResult, EncryptedSnapshotRecord, EncryptionMember, isColumnScope, NewKeyRequest, ScopeBinding,
@@ -24,7 +25,10 @@ export class MemoryRelay {
   public wraps: DocKeyRecord[] = [];
   public bindings: ScopeBinding[] = [];
   public members: MemoryMember[] = [];
-  public pushes = { accepted: 0, refused: 0 };
+  public pushes = { accepted: 0, refused: 0, denied: 0 };
+  // Every push attempt, in order, by member.
+  public pushLog: { userId: number, baseActionNum: number, keyId: string, outcome: string }[] = [];
+  public files = new Map<string, Base64>();
   // Broadcasts can be held back, to simulate changes crossing in flight.
   public holdBroadcasts = false;
 
@@ -69,16 +73,33 @@ export class MemoryRelay {
     };
   }
 
+  public holds(userId: number, keyId: string) {
+    return this.wraps.some(w => w.userId === userId && w.keyId === keyId);
+  }
+
   public currentKey(scope: string) {
     return this.keys.find(k => k.scope === scope && k.current);
   }
 
   public push(from: RelayClient, baseActionNum: number, keyId: string, payload: Base64): EncryptedPushResult {
-    if (baseActionNum !== this.head || this.currentKey(DOC_SCOPE)?.keyId !== keyId) {
+    const log = (outcome: string) => this.pushLog.push({ userId: from.userId, baseActionNum, keyId, outcome });
+    if (this.currentKey(DOC_SCOPE)?.keyId !== keyId) {
       this.pushes.refused++;
+      log("refused");
+      return { accepted: false, head: this.head };
+    }
+    if (!this.holds(from.userId, keyId)) {
+      this.pushes.denied++;
+      log("denied");
+      throw new Error("Only members holding the document key can change it");
+    }
+    if (baseActionNum !== this.head) {
+      this.pushes.refused++;
+      log("refused");
       return { accepted: false, head: this.head };
     }
     this.pushes.accepted++;
+    log("accepted");
     const record = this._append({ kind: "change", keyId, payload, userId: from.userId });
     this._broadcast(from, record);
     return { accepted: true, actionNum: record.actionNum, timeMs: record.timeMs };
@@ -167,14 +188,23 @@ export class MemoryRelay {
     await Promise.all(held.map(deliver => deliver()));
   }
 
-  public saveSnapshot(actionNum: number, keyId: string, payload: Base64, compact?: boolean) {
+  public saveSnapshot(userId: number, actionNum: number, keyId: string, payload: Base64, compact?: boolean) {
     if (actionNum > this.head) { throw new Error("Snapshot is ahead of the document"); }
     if (this.currentKey(DOC_SCOPE)?.keyId !== keyId) { throw new Error("Snapshots must use the current key"); }
+    if (!this.holds(userId, keyId)) { throw new Error("Only members holding the document key can save it"); }
+    if (compact && this.members.find(m => m.userId === userId)?.access !== "owners") {
+      throw new Error("Only owners can drop the history of a document");
+    }
     if (compact) {
       this.snapshots = [];
       this.actions = this.actions.filter(a => a.actionNum > actionNum);
     }
-    this.snapshots.push({ actionNum, keyId, payload, timeMs: Date.now() });
+    const latest = this.snapshots[this.snapshots.length - 1];
+    if (latest && (actionNum < latest.actionNum || (actionNum === latest.actionNum && latest.keyId === keyId))) {
+      return;
+    }
+    this.snapshots = this.snapshots.filter(s => s.actionNum !== actionNum);
+    this.snapshots.push({ actionNum, keyId, payload, size: base64ToBytes(payload).length, timeMs: Date.now() });
   }
 
   private _append(record: Omit<EncryptedActionRecord, "actionNum" | "timeMs">): EncryptedActionRecord {
@@ -205,8 +235,26 @@ export class RelayClient implements IEncryptionRelay {
     return this._relay.push(this, baseActionNum, keyId, payload);
   }
 
-  public async saveSnapshot(actionNum: number, keyId: string, payload: Base64, options?: { compact?: boolean }) {
-    this._relay.saveSnapshot(actionNum, keyId, payload, options?.compact);
+  public async saveSnapshot(actionNum: number, keyId: string, payload: Uint8Array, options?: { compact?: boolean }) {
+    this._relay.saveSnapshot(this.userId, actionNum, keyId, bytesToBase64(payload), options?.compact);
+  }
+
+  public async fetchSnapshot(snapshot: EncryptedSnapshotRecord) {
+    const found = this._relay.snapshots.find(s => s.actionNum === snapshot.actionNum);
+    if (!found) { throw new Error("Snapshot not found"); }
+    return base64ToBytes(found.payload);
+  }
+
+  public async uploadFile(ciphertext: Uint8Array) {
+    const fileId = Math.random().toString(16).slice(2).padEnd(32, "0").slice(0, 32);
+    this._relay.files.set(fileId, bytesToBase64(ciphertext));
+    return { fileId };
+  }
+
+  public async fetchFile(fileId: string) {
+    const payload = this._relay.files.get(fileId);
+    if (payload === undefined) { throw new Error("File not found"); }
+    return base64ToBytes(payload);
   }
 
   public async getKeys() {

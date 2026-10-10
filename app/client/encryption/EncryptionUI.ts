@@ -5,7 +5,7 @@
  */
 import { domAsync } from "app/client/lib/domAsync";
 import { makeT } from "app/client/lib/localization";
-import { reportError, reportSuccess } from "app/client/models/errors";
+import { reportError, reportSuccess, reportWarning } from "app/client/models/errors";
 import { cssLabel, cssRow } from "app/client/ui/RightPanelStyles";
 import { basicButton, primaryButton } from "app/client/ui2018/buttons";
 import { labeledSquareCheckbox } from "app/client/ui2018/checkbox";
@@ -17,7 +17,7 @@ import { EncryptionMember } from "app/common/encryption/EncryptionTypes";
 import { Computed, dom, DomContents, MultiHolder, Observable, styled } from "grainjs";
 
 import type { GristDoc } from "app/client/components/GristDoc";
-import type { IDocEncryption } from "app/client/encryption/types";
+import type { IDocEncryption, KeyGrantResult } from "app/client/encryption/types";
 import type { ColumnRec } from "app/client/models/entities/ColumnRec";
 
 const t = makeT("EncryptionUI");
@@ -72,9 +72,9 @@ export function buildColumnPrivacySection(owner: MultiHolder, gristDoc: GristDoc
           t("Private column: only some members can read it.") :
           t("Private column: you don't have access to its values."),
         testId("column-private")),
-        dom.domComputed(use => use(version), () => domAsync(encryption.getScopeAudience(ownScope).then(members =>
+        domAsync(encryption.getScopeAudience(ownScope).then(members =>
           cssAudience(members.map(m => cssMember(m.name || m.email, testId("column-audience-member")))),
-        ))),
+        )),
         (encryption.isOwner && readable) ? cssRow(
           basicButton(t("Change who can read it"),
             dom.on("click", () => editAudience(encryption, { colRef, scope: ownScope })),
@@ -115,15 +115,25 @@ function editAudience(encryption: IDocEncryption, target: { colRef: number, scop
       saveLabel: target.scope ? t("Save") : t("Make private"),
       saveFunc: async () => {
         const userIds = [...selected.entries()].filter(([, obs]) => obs.get()).map(([id]) => id);
-        if (target.scope) {
-          await encryption.setScopeAudience(target.scope, userIds);
-        } else {
+        const result = target.scope ?
+          await encryption.setScopeAudience(target.scope, userIds) :
           await encryption.makeColumnPrivate(target.colRef, userIds);
-        }
         reportSuccess(t("Saved"));
+        reportKeyGrant({ granted: [], notReady: result.notReady });
       },
     };
   });
+}
+
+/** Tells who got access to keys, and who couldn't (members who haven't enabled encryption). */
+export function reportKeyGrant(result: KeyGrantResult) {
+  if (result.granted.length > 0) {
+    reportSuccess(t("Gave access to {{count}} member(s).", { count: result.granted.length }));
+  }
+  if (result.notReady.length > 0) {
+    reportWarning(t("{{members}} haven't enabled encryption on their account yet: give them access again once " +
+      "they have.", { members: result.notReady.map(m => m.name || m.email).join(", ") }));
+  }
 }
 
 /** A lock in the header of private columns. */
@@ -157,9 +167,7 @@ export function buildEncryptionSettings(owner: MultiHolder, gristDoc: GristDoc):
     ]))),
     encryption.isOwner ? cssRow(
       primaryButton(t("Give access to waiting members"),
-        dom.on("click", () => encryption.grantPendingKeys()
-          .then(granted => reportSuccess(t("Gave access to {{count}} member(s).", { count: granted.length })))
-          .catch(reportError)),
+        dom.on("click", () => encryption.grantPendingKeys().then(reportKeyGrant).catch(reportError)),
         testId("encryption-grant")),
       basicButton(t("Replace keys"),
         dom.on("click", () => encryption.requestKeyRotation()

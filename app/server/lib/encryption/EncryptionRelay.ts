@@ -12,11 +12,14 @@
  *  - createEncryptionKey (for a new column scope) and releaseEncryptionScope make columns private
  *    and public again: the server keeps track of which columns are private (ScopeBinding), as
  *    members could otherwise change it in the document;
- *  - uploadEncryptedFile and fetchEncryptedFile store and return encrypted attachments.
+ *  - uploadEncryptedFile and fetchEncryptedFile store and return encrypted attachments;
+ *  - beginEncryptedUpload, appendEncryptedUpload and fetchEncryptedSnapshot move snapshots and
+ *    files too big for a single message, by parts.
  *
  * Access is checked on every call, against the document's regular permissions: viewers can read,
- * editors can also write. Keys can only be given out by owners holding them, and only to members.
- * Members who lose access lose their copies of the keys, which get replaced on the next edit.
+ * editors holding the document key can also write. Keys can only be given out by owners holding
+ * them, and only to members. Members who lose access lose their copies of the keys, which get
+ * replaced on the next edit. Documents can't grow beyond the size their site's plan allows.
  */
 import { ApiError } from "app/common/ApiError";
 import { CommEncryptionMessage } from "app/common/CommTypes";
@@ -25,20 +28,26 @@ import {
   EncryptionKeysResult,
   EncryptionMember, isColumnScope, isEncryptedDoc, NewKeyRequest,
 } from "app/common/encryption/EncryptionTypes";
+import { Features } from "app/common/Features";
 import { ANONYMOUS_USER_EMAIL, EVERYONE_EMAIL, getRealAccess } from "app/common/UserAPI";
 import { User } from "app/gen-server/entity/User";
 import { HomeDBManager } from "app/gen-server/lib/homedb/HomeDBManager";
 import { Client } from "app/server/lib/Client";
 import { Comm } from "app/server/lib/Comm";
 import { DocAuthorizer, DocAuthorizerImpl } from "app/server/lib/DocAuthorizer";
-import { EncryptedDocFile, EncryptedDocStorage } from "app/server/lib/encryption/EncryptedDocStorage";
+import {
+  EncryptedDocFile, EncryptedDocStorage, MAX_INLINE_BYTES, PayloadSource,
+} from "app/server/lib/encryption/EncryptedDocStorage";
+import { getMaxEncryptedDocSize } from "app/server/lib/encryption/encryptionConfig";
 import { EncryptionStore } from "app/server/lib/encryption/EncryptionStore";
+import { IDocNotificationManager } from "app/server/lib/IDocNotificationManager";
 import { IDocStorageManager } from "app/server/lib/IDocStorageManager";
 import log from "app/server/lib/log";
 
 import { In } from "typeorm";
 
-// Base64 of a snapshot, change or file can't be bigger than this (the websocket limit is 100MB).
+// Base64 of a change, or of a part of a snapshot or file, can't be bigger than this (the websocket
+// limit is 100MB). Bigger snapshots and files go by parts (see beginEncryptedUpload).
 const MAX_PAYLOAD_LENGTH = 90e6;
 const MAX_KEY_LENGTH = 64 * 1024;
 
@@ -46,6 +55,7 @@ type Role = "viewers" | "editors" | "owners";
 
 interface Subscription {
   auth: DocAuthorizer;
+  stopListening: () => void;
 }
 
 class Refused extends Error {
@@ -58,7 +68,8 @@ export class EncryptionRelay {
   // For each docId, the clients that have it open.
   private _subscribers = new Map<string, Map<Client, Subscription>>();
 
-  constructor(private _dbManager: HomeDBManager, storageManager: IDocStorageManager) {
+  constructor(private _dbManager: HomeDBManager, storageManager: IDocStorageManager,
+    private _notifier?: IDocNotificationManager) {
     this._keys = new EncryptionStore(_dbManager);
     this._storage = new EncryptedDocStorage(storageManager);
   }
@@ -71,8 +82,11 @@ export class EncryptionRelay {
         this.fetchActions(client, docId, afterActionNum),
       pushEncryptedAction: (client: Client, docId: string, baseActionNum: number, keyId: string, payload: Base64) =>
         this.pushAction(client, docId, baseActionNum, keyId, payload),
-      saveEncryptedSnapshot: (client: Client, docId: string, actionNum: number, keyId: string, payload: Base64,
-        options?: { compact?: boolean }) => this.saveSnapshot(client, docId, actionNum, keyId, payload, options),
+      saveEncryptedSnapshot: (client: Client, docId: string, actionNum: number, keyId: string,
+        payload: PayloadSource, options?: { compact?: boolean }) =>
+        this.saveSnapshot(client, docId, actionNum, keyId, payload, options),
+      fetchEncryptedSnapshot: (client: Client, docId: string, actionNum: number, offset: number, length: number) =>
+        this.fetchSnapshot(client, docId, actionNum, offset, length),
       getEncryptionKeys: (client: Client, docId: string) => this.getKeys(client, docId),
       listEncryptionMembers: (client: Client, docId: string) => this.listMembers(client, docId),
       shareEncryptionKeys: (client: Client, docId: string, wraps: DocKeyRecord[]) =>
@@ -85,8 +99,13 @@ export class EncryptionRelay {
         this.requestRotation(client, docId, scope),
       releaseEncryptionScope: (client: Client, docId: string, scope: string, baseActionNum: number) =>
         this.releaseScope(client, docId, scope, baseActionNum),
-      uploadEncryptedFile: (client: Client, docId: string, payload: Base64) => this.uploadFile(client, docId, payload),
-      fetchEncryptedFile: (client: Client, docId: string, fileId: string) => this.fetchFile(client, docId, fileId),
+      uploadEncryptedFile: (client: Client, docId: string, payload: PayloadSource) =>
+        this.uploadFile(client, docId, payload),
+      fetchEncryptedFile: (client: Client, docId: string, fileId: string, offset?: number, length?: number) =>
+        this.fetchFile(client, docId, fileId, offset, length),
+      beginEncryptedUpload: (client: Client, docId: string) => this.beginUpload(client, docId),
+      appendEncryptedUpload: (client: Client, docId: string, uploadId: string, seq: number, chunk: Base64) =>
+        this.appendUpload(client, docId, uploadId, seq, chunk),
     });
   }
 
@@ -141,38 +160,81 @@ export class EncryptionRelay {
 
   public async pushAction(client: Client, docId: string, baseActionNum: number, keyId: string,
     payload: Base64): Promise<EncryptedPushResult> {
-    await this._authorize(client, docId, "editors");
+    const auth = await this._authorize(client, docId, "editors");
     checkPayload(payload);
     baseActionNum = checkActionNum(baseActionNum);
-    const userId = this._getUserId(client);
+    const userId = this._requireUserId(client);
     // Changes must use the current document key: after a key change, changes made with the
     // previous one are refused, and their author catches up (getting the new key) and retries.
     const docKey = await this._keys.getCurrentKey(docId, DOC_SCOPE);
     if (docKey?.keyId !== keyId) {
       return { accepted: false, head: await this._getHead(docId) };
     }
-    const result = await this._storage.withDoc(docId, { write: true }, file =>
-      file.appendAction(baseActionNum, { kind: "change", keyId, payload, userId }));
+    // Only members holding the key can make changes others can read.
+    await this._requireHolder(docId, userId, keyId);
+    const result = await this._storage.withDoc(docId, { write: true }, async (file) => {
+      await this._checkSize(auth, file, payload.length);
+      return file.appendAction(baseActionNum, { kind: "change", keyId, payload, userId });
+    });
     if (!result.accepted) { return result; }
     this._broadcast(docId, client, { type: "encryptedDocAction", data: { docId, action: result.action } });
+    // Subscribers to the document's changes can only be told that it changed, and by whom.
+    this._notifier?.notifySubscribersOfEncryptedChange?.(docId, userId)
+      .catch(e => log.warn("EncryptionRelay: notification failed", e));
     return { accepted: true, actionNum: result.action.actionNum, timeMs: result.action.timeMs };
   }
 
   public async saveSnapshot(client: Client, docId: string, actionNum: number, keyId: string,
-    payload: Base64, options: { compact?: boolean } = {}): Promise<void> {
-    await this._authorize(client, docId, "editors");
-    checkPayload(payload);
+    payload: PayloadSource, options: { compact?: boolean } = {}): Promise<void> {
+    const auth = await this._authorize(client, docId, "editors");
+    checkPayloadSource(payload);
     actionNum = checkActionNum(actionNum);
     const userId = this._requireUserId(client);
+    const compact = Boolean(options?.compact);
+    // Compacting drops the history and older snapshots, which are what to recover from if a
+    // member damages the document: only owners can do it (e.g. when making a column private).
+    if (compact && auth.getCachedAuth().access !== "owners") {
+      throw new ApiError("Only owners can drop the history of a document", 403);
+    }
     const docKey = await this._keys.getCurrentKey(docId, DOC_SCOPE);
     if (docKey?.keyId !== keyId) {
       throw new ApiError("Snapshots must use the current document key", 409);
     }
-    if (!(await this._keys.getWraps(docId, { userId, keyIds: [keyId] })).length) {
-      throw new ApiError("Only a member holding the document key can save it", 403);
-    }
-    await this._storage.withDoc(docId, { write: true }, file =>
-      file.saveSnapshot(actionNum, keyId, payload, userId, { compact: Boolean(options?.compact) }));
+    await this._requireHolder(docId, userId, keyId);
+    await this._storage.withDoc(docId, { write: true }, async (file) => {
+      await this._checkSize(auth, file, typeof payload === "string" ? payload.length : 0);
+      return file.saveSnapshot(actionNum, keyId, payload, userId, { compact });
+    });
+  }
+
+  /** Returns part of a snapshot too big to be returned whole by openEncryptedDoc. */
+  public async fetchSnapshot(client: Client, docId: string, actionNum: number, offset: number,
+    length: number): Promise<Base64> {
+    await this._authorize(client, docId, "viewers");
+    actionNum = checkActionNum(actionNum);
+    checkRange(offset, length);
+    return this._storage.withDoc(docId, { write: false }, file => file.readSnapshot(actionNum, offset, length));
+  }
+
+  /** Starts an upload of a snapshot or file too big for a single message. Returns its id. */
+  public async beginUpload(client: Client, docId: string): Promise<string> {
+    await this._authorize(client, docId, "editors");
+    this._requireUserId(client);
+    return this._storage.withDoc(docId, { write: true }, file => file.beginUpload());
+  }
+
+  /** Adds a part to an upload (parts are numbered from 0, and added in order). */
+  public async appendUpload(client: Client, docId: string, uploadId: string, seq: number,
+    chunk: Base64): Promise<void> {
+    const auth = await this._authorize(client, docId, "editors");
+    const userId = this._requireUserId(client);
+    checkUploadId(uploadId);
+    seq = checkActionNum(seq);
+    checkPayload(chunk);
+    await this._storage.withDoc(docId, { write: true }, async (file) => {
+      await this._checkSize(auth, file, chunk.length);
+      await file.appendUpload(uploadId, seq, chunk, userId);
+    });
   }
 
   public async getKeys(client: Client, docId: string): Promise<EncryptionKeysResult> {
@@ -266,13 +328,15 @@ export class EncryptionRelay {
     await this._checkMembers(client, docId, wraps.map(w => w.userId));
 
     if (scope === DOC_SCOPE && !current) {
-      // Setting up a new document: nothing to order it against.
-      const initialized = await this._storage.withDoc(docId, { write: false }, file => file.hasSnapshot());
-      if (initialized || await this._keys.hasAnyKey(docId)) {
-        throw new ApiError("Encrypted document is already initialized", 409);
-      }
-      await this._dbManager.connection.transaction(manager =>
-        this._keys.addKey(manager, docId, scope, keyId, wraps, callerId, 0));
+      // Setting up a new document: nothing to order it against. (Checked and done under the
+      // document's lock, so that two owners opening it at once can't both do it.)
+      await this._storage.withDoc(docId, { write: false }, async (file) => {
+        if (await file.hasSnapshot() || await this._keys.hasAnyKey(docId)) {
+          throw new ApiError("Encrypted document is already initialized", 409);
+        }
+        await this._dbManager.connection.transaction(manager =>
+          this._keys.addKey(manager, docId, scope, keyId, wraps, callerId, 0));
+      });
       this._broadcast(docId, null, { type: "encryptedDocKeys", data: { docId } });
       return { accepted: true, actionNum: 0, timeMs: Date.now() };
     }
@@ -361,24 +425,55 @@ export class EncryptionRelay {
     this._broadcast(docId, null, { type: "encryptedDocKeys", data: { docId } });
   }
 
-  public async uploadFile(client: Client, docId: string, payload: Base64): Promise<{ fileId: string }> {
-    await this._authorize(client, docId, "editors");
-    checkPayload(payload);
-    const maxBytes = Number(process.env.GRIST_MAX_UPLOAD_ATTACHMENT_MB) * 1024 * 1024;
-    if (maxBytes && payload.length * 3 / 4 > maxBytes * 1.1) {
-      throw new ApiError("Attachment is too large", 413);
-    }
-    const userId = this._getUserId(client);
-    const fileId = await this._storage.withDoc(docId, { write: true }, file => file.saveFile(payload, userId));
+  public async uploadFile(client: Client, docId: string, payload: PayloadSource): Promise<{ fileId: string }> {
+    const auth = await this._authorize(client, docId, "editors");
+    checkPayloadSource(payload);
+    const userId = this._requireUserId(client);
+    const fileId = await this._storage.withDoc(docId, { write: true }, async (file) => {
+      await this._checkSize(auth, file, typeof payload === "string" ? payload.length : 0);
+      // As for regular attachments (encryption adds a little).
+      const maxBytes = Number(process.env.GRIST_MAX_UPLOAD_ATTACHMENT_MB) * 1024 * 1024;
+      const size = typeof payload === "string" ? payload.length * 3 / 4 : await file.getUploadSize(payload.uploadId);
+      if (maxBytes && size > maxBytes * 1.1 + 1024) {
+        throw new ApiError("Attachment is too large", 413);
+      }
+      return file.saveFile(payload, userId);
+    });
     return { fileId };
   }
 
-  public async fetchFile(client: Client, docId: string, fileId: string): Promise<Base64> {
+  /**
+   * Returns an encrypted file, or part of it (from offset, up to length bytes), with its size.
+   * Files bigger than what one message can take are returned by parts.
+   */
+  public async fetchFile(client: Client, docId: string, fileId: string, offset: number = 0,
+    length: number = MAX_INLINE_BYTES): Promise<{ payload: Base64, size: number }> {
     await this._authorize(client, docId, "viewers");
     if (typeof fileId !== "string" || !/^[0-9a-f]{32}$/.test(fileId)) { throw new ApiError("Invalid file", 400); }
-    const payload = await this._storage.withDoc(docId, { write: false }, file => file.getFile(fileId));
-    if (payload === null) { throw new ApiError("File not found", 404); }
-    return payload;
+    checkRange(offset, length);
+    return this._storage.withDoc(docId, { write: false }, async (file) => {
+      const size = await file.getFileSize(fileId);
+      if (size === null) { throw new ApiError("File not found", 404); }
+      return { payload: (await file.readFile(fileId, offset, length))!, size };
+    });
+  }
+
+  private async _requireHolder(docId: string, userId: number, keyId: string) {
+    if (!(await this._keys.getWraps(docId, { userId, keyIds: [keyId] })).length) {
+      throw new ApiError("Only members holding the document key can change it", 403);
+    }
+  }
+
+  /**
+   * Refuses to store more if the document would take more than its site's plan allows (for its
+   * data and attachments together, since the server can't tell them apart), or than configured.
+   */
+  private async _checkSize(auth: DocAuthorizer, file: EncryptedDocFile, incomingBase64Length: number) {
+    const maxSize = getMaxSize(auth.getCachedAuth().cachedDoc);
+    if (!maxSize) { return; }
+    if (await file.getSize() + incomingBase64Length * 3 / 4 > maxSize) {
+      throw new ApiError("This document has reached its maximum size", 413);
+    }
   }
 
   private async _getHead(docId: string) {
@@ -454,9 +549,26 @@ export class EncryptionRelay {
       if (!docAuth.access) { stale.push(userId); }
     }
     if (stale.length > 0) {
-      log.info(`EncryptionRelay: revoking keys of ${stale.length} former member(s) of ${docId}`);
-      await this._keys.revokeWraps(docId, stale);
-      this._broadcast(docId, null, { type: "encryptedDocKeys", data: { docId } });
+      // Don't take away the last copies of a key: if all members holding it lost access (e.g.
+      // by mistake), giving it back would be impossible, and its content lost for good. Former
+      // members can't get any content anyway without access to the document.
+      const keys = await this._keys.getKeys(docId);
+      const wraps = await this._keys.getWraps(docId);
+      const staleSet = new Set(stale);
+      const keptScopes = new Set(keys.filter(k => k.current).filter((k) => {
+        const holders = wraps.filter(w => w.keyId === k.keyId).map(w => w.userId);
+        return holders.length > 0 && holders.every(id => staleSet.has(id));
+      }).map(k => k.scope));
+      const revocable = keys.filter(k => !keptScopes.has(k.scope)).map(k => k.keyId);
+      if (keptScopes.size > 0) {
+        log.warn(`EncryptionRelay: no member of ${docId} holding keys of ${[...keptScopes].join(", ")} has ` +
+          "access to it anymore: keeping their copies");
+      }
+      if (revocable.length > 0) {
+        log.info(`EncryptionRelay: revoking keys of ${stale.length} former member(s) of ${docId}`);
+        await this._keys.revokeWraps(docId, stale, revocable);
+        this._broadcast(docId, null, { type: "encryptedDocKeys", data: { docId } });
+      }
     }
     return members;
   }
@@ -482,11 +594,18 @@ export class EncryptionRelay {
   private _subscribe(client: Client, docId: string, auth: DocAuthorizer) {
     let subs = this._subscribers.get(docId);
     if (!subs) { this._subscribers.set(docId, subs = new Map()); }
-    subs.set(client, { auth });
+    const existing = subs.get(client);
+    if (existing) {
+      existing.auth = auth;
+    } else {
+      // Forget clients as soon as they're gone (rather than on the next broadcast).
+      subs.set(client, { auth, stopListening: client.onDestroy(() => this._unsubscribe(client, docId)) });
+    }
   }
 
   private _unsubscribe(client: Client, docId: string) {
     const subs = this._subscribers.get(docId);
+    subs?.get(client)?.stopListening();
     subs?.delete(client);
     if (subs?.size === 0) { this._subscribers.delete(docId); }
   }
@@ -519,6 +638,34 @@ function checkPayload(payload: unknown): asserts payload is string {
   if (typeof payload !== "string" || payload.length > MAX_PAYLOAD_LENGTH || !/^[A-Za-z0-9+/=]*$/.test(payload)) {
     throw new ApiError("Invalid encrypted payload", 400);
   }
+}
+
+function checkPayloadSource(source: unknown): asserts source is PayloadSource {
+  if (typeof source === "string") { return checkPayload(source); }
+  checkUploadId((source as any)?.uploadId);
+}
+
+function checkUploadId(uploadId: unknown): asserts uploadId is string {
+  if (typeof uploadId !== "string" || !/^[0-9a-f]{32}$/.test(uploadId)) {
+    throw new ApiError("Invalid upload", 400);
+  }
+}
+
+function checkRange(offset: unknown, length: unknown) {
+  if (!Number.isInteger(offset) || (offset as number) < 0 || !Number.isInteger(length) || (length as number) <= 0 ||
+    (length as number) > MAX_INLINE_BYTES) {
+    throw new ApiError("Invalid range", 400);
+  }
+}
+
+/** The most a document may take, given its site's plan (or the configuration), if limited. */
+function getMaxSize(doc: any): number | undefined {
+  const billingAccount = doc?.workspace?.org?.billingAccount;
+  const features: Features | undefined = billingAccount?.getEffectiveFeatures?.() ?? billingAccount?.product?.features;
+  const dataSize = features?.baseMaxDataSizePerDocument;
+  const attachmentsSize = features?.baseMaxAttachmentsBytesPerDocument;
+  if (dataSize !== undefined && attachmentsSize !== undefined) { return dataSize + attachmentsSize; }
+  return getMaxEncryptedDocSize();
 }
 
 function checkActionNum(actionNum: unknown): number {

@@ -790,7 +790,9 @@ export class FieldBuilder extends Disposable {
       return clearOwn();
     }
     // Private values of encrypted documents can't be edited by members who can't read them.
-    if (isLockedCell(value)) {
+    // (Members who can see them locked when their value didn't check out: they can set it again.)
+    const isLocked = isLockedCell(value);
+    if (isLocked && !this._canReadPrivateValues()) {
       reportWarning(t("You don't have access to this private column"), { key: "locked-cell" });
       return clearOwn();
     }
@@ -827,7 +829,8 @@ export class FieldBuilder extends Disposable {
       cellElem,
       editorCtor,
       state: options.state,
-      startVal: this._readonly.get() ? undefined : options.init, // don't start with initial value
+      // don't start with initial value (nor with the placeholder of a locked value)
+      startVal: this._readonly.get() ? undefined : (options.init ?? (isLocked ? "" : undefined)),
       readonly: this._readonly.get(), // readonly for editor will not be observable
       event: options.event,
     });
@@ -973,6 +976,14 @@ export class FieldBuilder extends Disposable {
 
     // Add editor to document holder - this will prevent multiple formula editor instances.
     this.gristDoc.fieldEditorHolder.autoDispose(formulaEditor);
+  }
+
+  // Whether the user can read the values of this column, which may be private in encrypted documents.
+  private _canReadPrivateValues(): boolean {
+    const encryption = this.gristDoc.docComm.encryption;
+    if (!encryption) { return true; }
+    const scopes = encryption.columnScopes(this.origColumn.table.peek().tableId.peek(), this.origColumn.colId.peek());
+    return scopes.every(scope => encryption.canReadScope(scope));
   }
 }
 

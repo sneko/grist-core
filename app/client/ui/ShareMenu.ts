@@ -1,4 +1,5 @@
-import { downloadActiveSection, LocalExportFormat } from "app/client/encryption/localExport";
+import { reportKeyGrant } from "app/client/encryption/EncryptionUI";
+import { downloadSection, LocalExportFormat } from "app/client/encryption/localExport";
 import { hooks } from "app/client/Hooks";
 import { loadUserManager } from "app/client/lib/imports";
 import { makeT } from "app/client/lib/localization";
@@ -55,7 +56,13 @@ export function buildShareMenuButton(pageModel: DocPageModel): DomContents {
   return dom.maybe(pageModel.currentDoc, (doc) => {
     const isProposable = Boolean(doc.options?.proposedChanges?.acceptProposals);
     const saveCopy = () => handleSaveCopy({ pageModel, doc, modalTitle: t("Save Document") });
-    if (doc.isSnapshot) {
+    if (isEncryptedDoc(doc)) {
+      // The server can't copy or export encrypted documents: exports are made by the browser.
+      return shareButton(null, () => [
+        menuManageUsers(doc, pageModel),
+        menuLocalExports(pageModel),
+      ]);
+    } else if (doc.isSnapshot) {
       const backToCurrent = () => urlState().pushUrl({ doc: buildOriginalUrlId(doc.id, true) });
       return shareButton(t("Back to current"), () => [
         menuManageUsers(doc, pageModel),
@@ -115,12 +122,6 @@ export function buildShareMenuButton(pageModel: DocPageModel): DomContents {
           menuExports(doc, pageModel),
         ]);
       }
-    } else if (isEncryptedDoc(doc)) {
-      // The server can't copy or export encrypted documents: exports are made by the browser.
-      return shareButton(null, () => [
-        menuManageUsers(doc, pageModel),
-        menuLocalExports(pageModel),
-      ]);
     } else {
       return shareButton(null, () => [
         menuManageUsers(doc, pageModel),
@@ -321,11 +322,7 @@ function menuLocalExports(pageModel: DocPageModel) {
         { key: "exporting-not-available" });
       return;
     }
-    try {
-      downloadActiveSection(gristDoc, format);
-    } catch (e) {
-      reportError(e);
-    }
+    downloadSection(gristDoc, format).catch(reportError);
   };
   return [
     menuDivider(),
@@ -333,6 +330,7 @@ function menuLocalExports(pageModel: DocPageModel) {
       () => [
         menuItem(exportAs("csv"), t("Comma Separated Values (.csv)"), testId("tb-share-option")),
         menuItem(exportAs("tsv"), t("Tab Separated Values (.tsv)"), testId("tb-share-option")),
+        menuItem(exportAs("xlsx"), t("Microsoft Excel (.xlsx)"), testId("tb-share-option")),
       ],
       {},
       menuIcon("Download"),
@@ -442,7 +440,7 @@ async function manageUsers(doc: DocInfo, docPageModel: DocPageModel) {
       // For encrypted documents, give keys to newly added members right away (owners only).
       const encryption = docPageModel.gristDoc.get()?.docComm.encryption;
       if (encryption?.isOwner) {
-        encryption.grantPendingKeys().catch(reportError);
+        encryption.grantPendingKeys().then(reportKeyGrant).catch(reportError);
       }
     },
     reload: () => api.getDocAccess(doc.id),

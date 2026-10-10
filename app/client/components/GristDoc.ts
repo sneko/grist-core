@@ -21,6 +21,7 @@ import { RecordCardPopup } from "app/client/components/RecordCardPopup";
 import { RegionFocusSwitcher } from "app/client/components/RegionFocusSwitcher";
 import { ActionGroupWithCursorPos, UndoStack } from "app/client/components/UndoStack";
 import { ViewLayout } from "app/client/components/ViewLayout";
+import { guardDocApi } from "app/client/encryption/serverDataGuard";
 import { get as getBrowserGlobals } from "app/client/lib/browserGlobals";
 import { copyToClipboard } from "app/client/lib/clipboardUtils";
 import { DocPluginManager } from "app/client/lib/DocPluginManager";
@@ -302,7 +303,9 @@ export class GristDocImpl extends DisposableWithEvents implements GristDoc {
   public readonly formulaPopup = Holder.create(this);
 
   public get docApi() {
-    return this.docPageModel.appModel.api.getDocAPI(this.docPageModel.currentDocId.get()!);
+    // Encrypted documents' data mustn't reach the server.
+    return guardDocApi(this.docPageModel.appModel.api.getDocAPI(this.docPageModel.currentDocId.get()!),
+      this.docComm.isEncrypted);
   }
 
   public isTimingOn = Observable.create(this, false);
@@ -347,7 +350,8 @@ export class GristDocImpl extends DisposableWithEvents implements GristDoc {
   private _disableAutoStartingTours: boolean = false;
   private _isShowingPopupSection = false;
   private _prevSectionId: number | null = null;
-  private _assistantPopup = buildAssistantPopup(this);
+  // (The assistant sends the document's content to an AI service: not for encrypted documents.)
+  private _assistantPopup = this.docComm.isEncrypted ? null : buildAssistantPopup(this);
   private _diffModels: Record<string, DataTableModelWithDiff> = {};
   private _showAllRowsInComparison: boolean = false;
 

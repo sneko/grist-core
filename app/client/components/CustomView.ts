@@ -373,7 +373,14 @@ Please contact document owner or modify access rules."),
     // array of nodes (comment, node, comment) and it somehow breaks the dispose order. Collapsed widgets
     // relay on a correct order of dispose, and are detaching nodes just before they are disposed, so if
     // the order is wrong, the node is disposed without being detached first.
-    return dom.update(widgetFrame.buildDom(), dom.autoDispose(widgetFrame));
+    // (A single element, whose children are laid out as if they were its parent's.)
+    return dom("div", dom.style("display", "contents"),
+      dom.maybe(widgetFrame.blocked, () => buildNotification(
+        t("This widget can't be used in end-to-end encrypted documents: it would see their content."),
+        testId("widget-blocked"),
+      )),
+      dom.update(widgetFrame.buildDom(), dom.autoDispose(widgetFrame)),
+    );
   }
 }
 

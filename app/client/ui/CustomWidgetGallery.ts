@@ -1,6 +1,10 @@
 import { GristDoc } from "app/client/components/GristDoc";
+import {
+  canAddWidgetsByUrlInEncryptedDoc, isWidgetAllowedInEncryptedDoc,
+} from "app/client/encryption/widgetPolicy";
 import { makeT } from "app/client/lib/localization";
 import { ViewSectionRec } from "app/client/models/DocModel";
+import { reportError } from "app/client/models/errors";
 import { textInput } from "app/client/ui/inputs";
 import { shadowScroll } from "app/client/ui/shadowScroll";
 import { withInfoTooltip } from "app/client/ui/tooltips";
@@ -168,7 +172,9 @@ class CustomWidgetGallery extends Disposable {
   }
 
   private async _initializeWidgets() {
-    const widgets: ICustomWidget[] = [
+    // Widgets see the content of documents: in encrypted ones, only some may be used.
+    const isEncrypted = this._gristDoc.docComm.isEncrypted;
+    const widgets: ICustomWidget[] = (isEncrypted && !canAddWidgetsByUrlInEncryptedDoc()) ? [] : [
       {
         widgetId: "custom",
         name: t("Custom URL"),
@@ -182,6 +188,7 @@ class CustomWidgetGallery extends Disposable {
 
       widgets.push(...remoteWidgets
         .filter(({ published }) => published !== false)
+        .filter(({ url }) => !isEncrypted || isWidgetAllowedInEncryptedDoc(url))
         .sort((a, b) => a.name.localeCompare(b.name)));
     } catch (e) {
       reportError(e);
@@ -337,6 +344,11 @@ class CustomWidgetGallery extends Disposable {
       // reportValidity will trigger native browser validation, showing a message to the user if the url is invalid
       const isValidUrl = this._customUrlInput?.reportValidity();
       const isEmptyUrl = !this._customUrl.get().length;
+      if (!isEmptyUrl && this._gristDoc.docComm.isEncrypted && !isWidgetAllowedInEncryptedDoc(this._customUrl.get())) {
+        reportError(new Error(t("This widget can't be used in end-to-end encrypted documents: it would see their " +
+          "content.")));
+        return false;
+      }
       return isEmptyUrl || (isValidUrl && await userTrustsCustomWidget());
     }
     return true;

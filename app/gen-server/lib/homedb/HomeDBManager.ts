@@ -106,6 +106,7 @@ import {
 } from "app/gen-server/sqlUtils";
 import { appSettings } from "app/server/lib/AppSettings";
 import { getOrCreateConnection } from "app/server/lib/dbUtils";
+import { isEncryptionEnabled } from "app/server/lib/encryption/encryptionConfig";
 import { StorageCoordinator } from "app/server/lib/GristServer";
 import { getPersonalOrgsEnabled } from "app/server/lib/gristSettings";
 import { makeId } from "app/server/lib/idUtils";
@@ -1829,6 +1830,9 @@ export class HomeDBManager implements HomeDBAuth {
       const doc = new Document();
       doc.id = docId || makeId();
       doc.checkProperties(props);
+      if (props.options?.encryption && !isEncryptionEnabled()) {
+        throw new ApiError("End-to-end encrypted documents are not enabled on this server", 400);
+      }
       doc.updateFromProperties(props, { isNew: true });
       // For some reason, isPinned defaulting to null, not false,
       // for some typeorm/postgres combination? That causes a

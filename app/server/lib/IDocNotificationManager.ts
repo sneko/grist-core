@@ -53,6 +53,13 @@ export interface IDocNotificationManager {
   notifySubscribers(docSession: OptDocSession, docId: string, accessControl: GranularAccessForBundle): Promise<void>;
 
   /**
+   * Prepare a notification for a change to an end-to-end encrypted document. The server can't
+   * read such changes: all that's known is who made one, and when (now). Optional: editions not
+   * implementing it don't notify of changes to encrypted documents.
+   */
+  notifySubscribersOfEncryptedChange?(docId: string, userId: number): Promise<void>;
+
+  /**
    * Prepare a notification for a particular suggestion.
    */
   notifySubscribersOfSuggestion(docId: string, proposal: Proposal): Promise<void>;

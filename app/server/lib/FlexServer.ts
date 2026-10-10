@@ -188,6 +188,7 @@ export class FlexServer implements GristServer {
   private _attachmentStoreProvider: IAttachmentStoreProvider;
   private _docManager: DocManager;
   private _docWorker: DocWorker;
+  private _encryptionRelay?: EncryptionRelay;
   private _hosts: Hosts;
   private _pluginManager: PluginManager;
   private _sessions: Sessions;
@@ -897,13 +898,14 @@ export class FlexServer implements GristServer {
     this.app.use(/^\/help\//, expressWrap(async (req, res) => {
       res.redirect("https://support.getgrist.com");
     }));
-    // If there is a static ext directory, serve material from there as well.
-    // This is used to run Grist with full edition extensions downloaded at
-    // runtime, and is also handy for extensions such as an Electron app.
-    // Browsers run the data engine themselves for end-to-end encrypted documents.
+    // Browsers run the data engine themselves for end-to-end encrypted documents. (This also
+    // checks the encryption settings, so that mistakes are reported on startup.)
     if (isEncryptionEnabled()) {
       addEncryptionEngineEndpoints(this.app);
     }
+    // If there is a static ext directory, serve material from there as well.
+    // This is used to run Grist with full edition extensions downloaded at
+    // runtime, and is also handy for extensions such as an Electron app.
     const staticExtDir = process.env.GRIST_STATIC_EXT_DIR || getAppPathTo(this.appRoot, "static") + "_ext";
     const staticExtApp = fse.existsSync(staticExtDir) ?
       express.static(staticExtDir, serveAnyOrigin) : null;
@@ -1208,6 +1210,8 @@ export class FlexServer implements GristServer {
     this._installAdmin?.clearCaches();
     // Terminate any remaining socket clients, as http.Server won't close them during .close().
     await this._comm?.close();
+    // Encrypted documents' files are closed (and synced) like other documents' on shutdown.
+    await this._encryptionRelay?.close();
     if (this.server)      { this.server.close(); }
     if (this.httpsServer) { this.httpsServer.close(); }
     if (this.housekeeper) { await this.housekeeper.stop(); }
@@ -1768,8 +1772,10 @@ export class FlexServer implements GristServer {
     docWorker.registerCommPlugin();
 
     // End-to-end encrypted documents aren't opened by the server, only relayed.
-    if (this._dbManager && !isSingleUserMode()) {
-      new EncryptionRelay(this._dbManager, this.getStorageManager()).registerCommMethods(this._comm);
+    if (this._dbManager && !isSingleUserMode() && isEncryptionEnabled()) {
+      this._encryptionRelay = new EncryptionRelay(this._dbManager, this.getStorageManager(),
+        this.getDocNotificationManager());
+      this._encryptionRelay.registerCommMethods(this._comm);
     }
 
     // Doc-specific endpoints require authorization; collect the relevant middleware in one list.
@@ -2585,6 +2591,7 @@ export class FlexServer implements GristServer {
 
     // Pick up the pace on saving documents.
     this._storageManager.prepareToCloseStorage();
+    await this._encryptionRelay?.close();
 
     // We urgently want to disable any new assignments.
     await workers.setWorkerAvailability(this.worker.id, false);

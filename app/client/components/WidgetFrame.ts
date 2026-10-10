@@ -2,6 +2,7 @@ import BaseView from "app/client/components/BaseView";
 import { CommandName } from "app/client/components/commandList";
 import * as commands from "app/client/components/commands";
 import { GristDoc } from "app/client/components/GristDoc";
+import { isWidgetAllowedInEncryptedDoc } from "app/client/encryption/widgetPolicy";
 import { hooks } from "app/client/Hooks";
 import { get as getBrowserGlobals } from "app/client/lib/browserGlobals";
 import { withCustomCssVars } from "app/client/lib/customCssParser";
@@ -100,6 +101,11 @@ export interface WidgetFrameOptions {
  * Iframe that embeds Custom Widget page and exposes Grist API.
  */
 export class WidgetFrame extends DisposableWithEvents {
+  /**
+   * Set when the widget can't be used in this document: in end-to-end encrypted documents, only
+   * some widgets may see the content (see widgetPolicy.ts).
+   */
+  public readonly blocked: Observable<boolean>;
   // A grist-rpc object, encapsulated to prevent direct access.
   private _rpc: Rpc;
   // Created iframe element, used to receive and post messages via Rpc
@@ -147,10 +153,16 @@ export class WidgetFrame extends DisposableWithEvents {
     // Url if set.
     const maybeUrl = Computed.create(this, use => use(this._widget)?.url || this._options.url);
 
+    const isEncrypted = Boolean(this._options.gristDoc?.docComm.isEncrypted);
+    this.blocked = Computed.create(this, (use) => {
+      const url = use(maybeUrl);
+      return Boolean(isEncrypted && url && !isWidgetAllowedInEncryptedDoc(url));
+    });
+
     // Url to widget or empty page with access level and preferences.
     this._url = Computed.create(
       this,
-      use => this._urlWithAccess(use(maybeUrl)) || this._getEmptyWidgetPage(),
+      use => (!use(this.blocked) && this._urlWithAccess(use(maybeUrl))) || this._getEmptyWidgetPage(),
     );
 
     // Iframe is empty when url is not set.

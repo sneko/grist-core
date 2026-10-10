@@ -60,18 +60,19 @@ export function makeDocCipher(vault: IKeyVault, myKey: WrappedKey): IDocCipher {
 }
 
 /**
- * A stand-in for the encryption service, for tests and local development: every document uses
- * the same hardcoded key, and "wrapping" a key for a user just labels it. It exercises all the
+ * A stand-in for the encryption service, for tests and local development. It exercises all the
  * code paths of a real vault (keys per user, missing keys, encryption of all content), without
- * any of its security.
+ * any of its security: each document key is random, but "wrapped" for users with a hardcoded key
+ * (so anyone knowing it can unwrap any key), and labelled with the user it's for.
  */
 export class MockKeyVault implements IKeyVault {
   // 256-bit AES key, hex-encoded. Deliberately public: this vault provides no security.
   public static readonly DEFAULT_KEY_HEX = "4772697374453245452d6d6f636b2d6b65792d666f722d74657374732d6f6e6c";
 
-  private _key: Promise<CryptoKey>;
+  private _masterKey: Promise<CryptoKey>;
   private _isRegistered: (vaultUserId: string) => boolean;
   private _hasKeys: () => boolean;
+  private _keys = new Map<string, Promise<CryptoKey>>();
 
   constructor(options: {
     keyHex?: string,
@@ -79,7 +80,7 @@ export class MockKeyVault implements IKeyVault {
     registeredUsers?: (vaultUserId: string) => boolean,
     hasKeys?: () => boolean,
   } = {}) {
-    this._key = importAesKey(hexToBytes(options.keyHex || MockKeyVault.DEFAULT_KEY_HEX));
+    this._masterKey = importAesKey(hexToBytes(options.keyHex || MockKeyVault.DEFAULT_KEY_HEX));
     this._isRegistered = options.registeredUsers || (() => true);
     this._hasKeys = options.hasKeys || (() => true);
   }
@@ -91,53 +92,59 @@ export class MockKeyVault implements IKeyVault {
   }
 
   public async createDocumentKey(recipients: KeyRecipient[]) {
-    return this._wrapFor(recipients);
+    return this._wrapFor(crypto.getRandomValues(new Uint8Array(32)), recipients);
   }
 
   public async shareDocumentKey(myKey: WrappedKey, recipients: KeyRecipient[]) {
-    this._checkWrap(myKey);
-    return this._wrapFor(recipients);
+    return this._wrapFor(await this._unwrap(myKey), recipients);
   }
 
   public async encrypt(data: Uint8Array, myKey: WrappedKey): Promise<Uint8Array> {
-    this._checkWrap(myKey);
-    return aesEncrypt(await this._key, data);
+    return aesEncrypt(await this._getKey(myKey), data);
   }
 
   public async decrypt(data: Uint8Array, myKey: WrappedKey): Promise<Uint8Array> {
-    this._checkWrap(myKey);
-    return aesDecrypt(await this._key, data);
+    return aesDecrypt(await this._getKey(myKey), data);
   }
 
   public async encryptWithNewKey(data: Uint8Array, parentKey: WrappedKey) {
-    this._checkWrap(parentKey);
     const rawKey = crypto.getRandomValues(new Uint8Array(32));
-    const fileKey = await importAesKey(rawKey);
     return {
-      ciphertext: await aesEncrypt(fileKey, data),
-      nestedKey: await aesEncrypt(await this._key, rawKey),
+      ciphertext: await aesEncrypt(await importAesKey(rawKey), data),
+      nestedKey: await aesEncrypt(await this._getKey(parentKey), rawKey),
     };
   }
 
   public async decryptWithNestedKey(ciphertext: Uint8Array, parentKey: WrappedKey, nestedKey: Uint8Array) {
-    this._checkWrap(parentKey);
-    const rawKey = await aesDecrypt(await this._key, nestedKey);
+    const rawKey = await aesDecrypt(await this._getKey(parentKey), nestedKey);
     return aesDecrypt(await importAesKey(rawKey), ciphertext);
   }
 
-  private _wrapFor(recipients: KeyRecipient[]) {
+  private async _wrapFor(rawKey: Uint8Array, recipients: KeyRecipient[]) {
+    const wrapped = bytesToBase64(await aesEncrypt(await this._masterKey, rawKey));
     const result = new Map<string, WrappedKey>();
     for (const r of recipients) {
       if (!this._isRegistered(r.vaultUserId)) { continue; }
-      result.set(r.vaultUserId, { wrappedKey: utf8Encode(`mock-wrap:${r.vaultUserId}`), keyVersion: 1 });
+      result.set(r.vaultUserId, { wrappedKey: utf8Encode(`mock-wrap:${r.vaultUserId}:${wrapped}`), keyVersion: 1 });
     }
     return result;
   }
 
-  private _checkWrap(myKey: WrappedKey) {
-    if (!utf8Decode(myKey.wrappedKey).startsWith("mock-wrap:")) {
-      throw new Error("MockKeyVault: not a key wrapped by this vault");
+  private async _unwrap(myKey: WrappedKey): Promise<Uint8Array> {
+    const match = /^mock-wrap:.*:([A-Za-z0-9+/=]+)$/.exec(utf8Decode(myKey.wrappedKey));
+    if (!match) { throw new Error("MockKeyVault: not a key wrapped by this vault"); }
+    return aesDecrypt(await this._masterKey, base64ToBytes(match[1]));
+  }
+
+  private _getKey(myKey: WrappedKey): Promise<CryptoKey> {
+    const id = utf8Decode(myKey.wrappedKey);
+    let key = this._keys.get(id);
+    if (!key) {
+      key = this._unwrap(myKey).then(importAesKey);
+      key.catch(() => this._keys.delete(id));
+      this._keys.set(id, key);
     }
+    return key;
   }
 }
 

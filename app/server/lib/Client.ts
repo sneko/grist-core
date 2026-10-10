@@ -92,6 +92,7 @@ export class Client {
   private _missedMessagesTotalLength: number = 0;
   private _destroyTimer: NodeJS.Timeout | null = null;
   private _destroyed: boolean = false;
+  private _destroyCallbacks = new Set<() => void>();
   private _websocket: GristServerSocket | null = null;
   private _req: IncomingMessage | null = null;
   private _authSession: AuthSession = AuthSession.unauthenticated();
@@ -171,6 +172,12 @@ export class Client {
 
   public isDestroyed(): boolean {
     return this._destroyed;
+  }
+
+  /** Calls callback when the client gets destroyed. Returns a function to stop doing so. */
+  public onDestroy(callback: () => void): () => void {
+    this._destroyCallbacks.add(callback);
+    return () => { this._destroyCallbacks.delete(callback); };
   }
 
   /**
@@ -467,6 +474,14 @@ export class Client {
     this._dropMissedMessages(this._nextSeqId);
     this._comm.removeClient(this);
     this._destroyed = true;
+    for (const callback of [...this._destroyCallbacks]) {
+      try {
+        callback();
+      } catch (e) {
+        this._log.warn(null, "error in destroy callback", e);
+      }
+    }
+    this._destroyCallbacks.clear();
   }
 
   public getLogMeta(meta: log.ILogMeta = {}): log.ILogMeta {

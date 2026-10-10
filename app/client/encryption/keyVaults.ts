@@ -46,6 +46,10 @@ let _vaultUserId: string | null | undefined;
 export function getKeyVault(config: EncryptionClientConfig, vaultUserId: string | null): Promise<IKeyVault> {
   if (_vault && _vaultUserId === vaultUserId) { return _vault; }
   _vaultUserId = vaultUserId;
+  if (config.mockVault) {
+    console.warn("Encrypted documents use a stand-in for the encryption service, with a known key: " +
+      "INSECURE, for tests and development only");
+  }
   const vault: Promise<IKeyVault> = config.mockVault ?
     Promise.resolve(new MockKeyVault({ keyHex: config.mockKey })) :
     ServiceKeyVault.create(config, vaultUserId);
@@ -90,14 +94,16 @@ class ServiceKeyVault implements IKeyVault {
   }
 
   public async createDocumentKey(recipients: KeyRecipient[]) {
+    const versions = await this._getVersions(recipients);
     // The vault mints a key only along with content to encrypt: give it none.
     const { encryptedKeys } = await this._client.encryptWithoutKey(new ArrayBuffer(0), toLabels(recipients));
-    return this._withVersions(recipients, encryptedKeys);
+    return this._withVersions(recipients, encryptedKeys, versions);
   }
 
   public async shareDocumentKey(myKey: WrappedKey, recipients: KeyRecipient[]) {
+    const versions = await this._getVersions(recipients);
     const { encryptedKeys } = await this._client.shareKeys(toArrayBuffer(myKey.wrappedKey), toLabels(recipients));
-    return this._withVersions(recipients, encryptedKeys);
+    return this._withVersions(recipients, encryptedKeys, versions);
   }
 
   public async encrypt(data: Uint8Array, myKey: WrappedKey) {
@@ -124,12 +130,23 @@ class ServiceKeyVault implements IKeyVault {
     return new Uint8Array(data);
   }
 
-  // A wrap is only usable with the version of the recipient's key it was made against.
-  private async _withVersions(recipients: KeyRecipient[], encryptedKeys: Record<string, ArrayBuffer>) {
+  private async _getVersions(recipients: KeyRecipient[]): Promise<Record<string, number | undefined>> {
     const users = await this._client.fetchPublicKeys(recipients.map(r => r.vaultUserId));
+    return Object.fromEntries(Object.entries(users).map(([id, u]) => [id, u.version]));
+  }
+
+  // A wrap is only usable with the version of the recipient's key it was made against: the
+  // versions known before wrapping must still be the current ones after.
+  private async _withVersions(recipients: KeyRecipient[], encryptedKeys: Record<string, ArrayBuffer>,
+    before: Record<string, number | undefined>) {
+    const after = await this._getVersions(recipients);
     const result = new Map<string, WrappedKey>();
     for (const [vaultUserId, wrappedKey] of Object.entries(encryptedKeys)) {
-      result.set(vaultUserId, { wrappedKey: new Uint8Array(wrappedKey), keyVersion: users[vaultUserId]?.version ?? 1 });
+      const keyVersion = before[vaultUserId];
+      if (typeof keyVersion !== "number" || after[vaultUserId] !== keyVersion) {
+        throw new Error("A member's encryption keys changed meanwhile: please try again");
+      }
+      result.set(vaultUserId, { wrappedKey: new Uint8Array(wrappedKey), keyVersion });
     }
     return result;
   }

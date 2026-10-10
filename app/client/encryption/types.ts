@@ -3,9 +3,19 @@
  * EncryptedDocSession, and exposed as DocComm.encryption). Kept apart so that UI code can use it
  * without loading the encryption code, which only encrypted documents load.
  */
+import { CellValue } from "app/common/DocActions";
 import { EncryptionMember } from "app/common/encryption/EncryptionTypes";
 
 import { Emitter } from "grainjs";
+
+/**
+ * Who got access to a key, and who couldn't yet: members who haven't enabled encryption (set up
+ * their keys in the encryption service) can't be given any.
+ */
+export interface KeyGrantResult {
+  granted: EncryptionMember[];
+  notReady: EncryptionMember[];
+}
 
 export interface IDocEncryption {
   readonly isOwner: boolean;
@@ -21,12 +31,14 @@ export interface IDocEncryption {
   canReadScope(scope: string): boolean;
   listMembers(): Promise<EncryptionMember[]>;
   getPendingMembers(): Promise<EncryptionMember[]>;
-  grantPendingKeys(): Promise<EncryptionMember[]>;
-  makeColumnPrivate(colRef: number, userIds: number[]): Promise<void>;
+  grantPendingKeys(): Promise<KeyGrantResult>;
+  makeColumnPrivate(colRef: number, userIds: number[]): Promise<KeyGrantResult>;
   makeColumnPublic(colRef: number): Promise<void>;
   getScopeAudience(scope: string): Promise<EncryptionMember[]>;
-  setScopeAudience(scope: string, userIds: number[]): Promise<void>;
+  setScopeAudience(scope: string, userIds: number[]): Promise<KeyGrantResult>;
   requestKeyRotation(scope?: string): Promise<void>;
   /** Imports files as new tables, parsing them in the browser. Returns the new tables' ids. */
   importFiles(files: File[]): Promise<string[]>;
+  /** Builds an Excel workbook in the browser: one sheet per [name, header, rows]. */
+  exportXlsx(sheets: [string, string[], CellValue[][]][]): Promise<Uint8Array>;
 }

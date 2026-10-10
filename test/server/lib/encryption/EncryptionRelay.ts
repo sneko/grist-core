@@ -3,8 +3,8 @@
  * between browsers, their storage in the document's file, and the management of keys.
  */
 import {
-  DOC_SCOPE, DocKeyRecord, ENCRYPTED_DOC_SERVER_ERROR, EncryptedDocOpenResult, EncryptionKeysResult,
-  EncryptionMember,
+  DOC_SCOPE, DocKeyRecord, ENCRYPTED_DOC_SERVER_ERROR, ENCRYPTED_PART_BYTES, EncryptedDocOpenResult,
+  EncryptionKeysResult, EncryptionMember,
 } from "app/common/encryption/EncryptionTypes";
 import { UserAPI } from "app/common/UserAPI";
 import { DocEncryptionKeyWrap } from "app/gen-server/entity/DocEncryption";
@@ -71,7 +71,12 @@ describe("encryption/EncryptionRelay", function() {
     }
   }
 
+  let suiteEnv: testUtils.EnvironmentSnapshot;
+
   before(async function() {
+    suiteEnv = new testUtils.EnvironmentSnapshot();
+    process.env.GRIST_ENCRYPTION_FEATURE_ENABLED = "true";
+    process.env.GRIST_ENCRYPTION_MOCK_VAULT = "true";
     home = new TestServer(this);
     await home.start(["home", "docs"]);
     const api = await home.createHomeApi("chimpy", "docs", true);
@@ -97,6 +102,7 @@ describe("encryption/EncryptionRelay", function() {
     const api = await home.createHomeApi("chimpy", "docs");
     await api.deleteOrg(ORG);
     await home.stop();
+    suiteEnv.restore();
   });
 
   describe("configuration", function() {
@@ -119,6 +125,12 @@ describe("encryption/EncryptionRelay", function() {
       assert.deepEqual(getEncryptionClientConfig(), { mockVault: true });
       process.env.NODE_ENV = "production";
       assert.throws(() => getEncryptionClientConfig(), /no security, and can't be used in production/);
+    });
+
+    it("refuses encrypted documents when they're not enabled", async function() {
+      process.env.GRIST_ENCRYPTION_FEATURE_ENABLED = "false";
+      await assert.isRejected(owner.newDoc({ name: "x", options: { encryption: { version: 1 } } }, wsId),
+        /not enabled on this server/);
     });
   });
 
@@ -217,10 +229,10 @@ describe("encryption/EncryptionRelay", function() {
 
       assert.deepInclude(await call(alice, "pushEncryptedAction", docId, 0, docKeyId, b64("c1")),
         { accepted: true, actionNum: 1 });
-      // Bob's change was computed on top of the same state: it's refused.
-      assert.deepEqual(await call(bob, "pushEncryptedAction", docId, 0, docKeyId, b64("c1-bob")),
-        { accepted: false, head: 1 });
-      // So is a change made with a key that isn't the current document key.
+      // Bob doesn't hold the document key yet: he can't make changes others could read.
+      await assert.isRejected(call(bob, "pushEncryptedAction", docId, 1, docKeyId, b64("c1-bob")),
+        /holding the document key/);
+      // A change made with a key that isn't the current document key is refused.
       assert.deepEqual(await call(alice, "pushEncryptedAction", docId, 1, "doc~old", b64("c2")),
         { accepted: false, head: 1 });
 
@@ -231,9 +243,9 @@ describe("encryption/EncryptionRelay", function() {
       }
       assert.isNull(await nextMessage(alice, "encryptedDocAction", 300));
 
-      assert.deepInclude(await call(bob, "pushEncryptedAction", docId, 1, docKeyId, b64("c2")),
+      assert.deepInclude(await call(alice, "pushEncryptedAction", docId, 1, docKeyId, b64("c2")),
         { accepted: true, actionNum: 2 });
-      assert.deepInclude((await nextMessage(alice, "encryptedDocAction"))?.data.action, { actionNum: 2 });
+      assert.deepInclude((await nextMessage(bob, "encryptedDocAction"))?.data.action, { actionNum: 2 });
       const all = await call(kiwi, "fetchEncryptedActions", docId, 0);
       assert.deepEqual(all.map((a: any) => [a.actionNum, a.payload]), [[1, b64("c1")], [2, b64("c2")]]);
 
@@ -275,8 +287,10 @@ describe("encryption/EncryptionRelay", function() {
       assert.equal((await nextMessage(bob, "encryptedDocKeys"))?.data.docId, docId);
       const keys: EncryptionKeysResult = await call(bob, "getEncryptionKeys", docId);
       assert.deepEqual(keys.myKeys, [wrap(ids["charon@getgrist.com"], docKeyId)]);
-      // Now Bob can save snapshots.
+      // Now Bob can save snapshots, and make changes, ordered with others'.
       await call(bob, "saveEncryptedSnapshot", docId, 2, docKeyId, b64("state2"));
+      assert.deepEqual(await call(bob, "pushEncryptedAction", docId, 1, docKeyId, b64("c2-bob")),
+        { accepted: false, head: 2 });
     });
 
     it("records new keys in the history, for those who held the previous one", async function() {
@@ -339,7 +353,11 @@ describe("encryption/EncryptionRelay", function() {
       const kiwi = await connect("kiwi@getgrist.com");
       const { fileId } = await call(alice, "uploadEncryptedFile", docId, b64("ciphertext of a file"));
       assert.match(fileId, /^[0-9a-f]{32}$/);
-      assert.equal(await call(kiwi, "fetchEncryptedFile", docId, fileId), b64("ciphertext of a file"));
+      assert.deepEqual(await call(kiwi, "fetchEncryptedFile", docId, fileId),
+        { payload: b64("ciphertext of a file"), size: 20 });
+      // Parts of it.
+      assert.deepEqual(await call(kiwi, "fetchEncryptedFile", docId, fileId, 14, 100),
+        { payload: b64("a file"), size: 20 });
       await assert.isRejected(call(kiwi, "uploadEncryptedFile", docId, b64("x")), /No write access/);
       await assert.isRejected(call(kiwi, "fetchEncryptedFile", docId, "0".repeat(32)), /not found/);
     });
@@ -349,8 +367,13 @@ describe("encryption/EncryptionRelay", function() {
       await call(alice, "openEncryptedDoc", docId);
       await assert.isRejected(call(alice, "saveEncryptedSnapshot", docId, 9, docKeyId, b64("ahead")), /doesn't match/);
       await call(alice, "saveEncryptedSnapshot", docId, 4, docKeyId, b64("state4"));
-      // Snapshots at 2 and 4 are kept: changes up to 2 aren't needed anymore.
-      assert.deepEqual((await call(alice, "fetchEncryptedActions", docId, 0)).map((a: any) => a.actionNum), [3, 4]);
+      // The latest few snapshots are kept (here at 0, 2 and 4), with the changes since the oldest.
+      assert.deepEqual((await call(alice, "fetchEncryptedActions", docId, 0)).map((a: any) => a.actionNum),
+        [1, 2, 3, 4]);
+      // Only owners can drop the history.
+      const bob = await connect("charon@getgrist.com");
+      await assert.isRejected(call(bob, "saveEncryptedSnapshot", docId, 4, docKeyId, b64("x"), { compact: true }),
+        /Only owners/);
       // Compacting keeps only the latest snapshot, even of the same state.
       await call(alice, "saveEncryptedSnapshot", docId, 4, docKeyId, b64("state4bis"), { compact: true });
       const opened: EncryptedDocOpenResult = await call(alice, "openEncryptedDoc", docId);
@@ -403,6 +426,76 @@ describe("encryption/EncryptionRelay", function() {
       await assert.isRejected(call(outsider, "fetchEncryptedActions", docId, 0), /No view access/);
       const alice = await connect("chimpy@getgrist.com");
       await assert.isRejected(call(alice, "openEncryptedDoc", plainDocId), /not end-to-end encrypted/);
+    });
+
+    it("moves big snapshots and files by parts", async function() {
+      const alice = await connect("chimpy@getgrist.com");
+      const kiwi = await connect("kiwi@getgrist.com");
+      const opened: EncryptedDocOpenResult = await call(alice, "openEncryptedDoc", docId);
+      const big = Buffer.alloc(ENCRYPTED_PART_BYTES + 1000, 7);
+      big.write("start");
+      big.write("end", big.length - 3);
+      // Uploads go in order, by members who can write.
+      const uploadId = await call(alice, "beginEncryptedUpload", docId);
+      await assert.isRejected(call(kiwi, "beginEncryptedUpload", docId), /No write access/);
+      await assert.isRejected(call(alice, "appendEncryptedUpload", docId, uploadId, 1, b64("x")), /Unknown or expired/);
+      await call(alice, "appendEncryptedUpload", docId, uploadId, 0,
+        big.subarray(0, ENCRYPTED_PART_BYTES).toString("base64"));
+      await call(alice, "appendEncryptedUpload", docId, uploadId, 1,
+        big.subarray(ENCRYPTED_PART_BYTES).toString("base64"));
+      await call(alice, "saveEncryptedSnapshot", docId, opened.head, docKeyId, { uploadId });
+      // (An upload is used once.)
+      await assert.isRejected(call(alice, "uploadEncryptedFile", docId, { uploadId }), /Unknown or expired/);
+      // Opening gives its size rather than its content, fetched by parts.
+      const reopened: EncryptedDocOpenResult = await call(kiwi, "openEncryptedDoc", docId);
+      assert.deepInclude(reopened.snapshot, { actionNum: opened.head, payload: "", size: big.length });
+      const first = await call(kiwi, "fetchEncryptedSnapshot", docId, opened.head, 0, ENCRYPTED_PART_BYTES);
+      const rest = await call(kiwi, "fetchEncryptedSnapshot", docId, opened.head, ENCRYPTED_PART_BYTES,
+        ENCRYPTED_PART_BYTES);
+      assert.isTrue(Buffer.concat([Buffer.from(first, "base64"), Buffer.from(rest, "base64")]).equals(big));
+      await assert.isRejected(call(kiwi, "fetchEncryptedSnapshot", docId, opened.head, 0, ENCRYPTED_PART_BYTES + 1),
+        /Invalid range/);
+      // Same for files.
+      const fileUpload = await call(alice, "beginEncryptedUpload", docId);
+      await call(alice, "appendEncryptedUpload", docId, fileUpload, 0, big.toString("base64").slice(0, 4000));
+      const { fileId } = await call(alice, "uploadEncryptedFile", docId, { uploadId: fileUpload });
+      assert.deepEqual(await call(kiwi, "fetchEncryptedFile", docId, fileId, 0, 5),
+        { payload: b64("start"), size: 3000 });
+    });
+
+    it("keeps documents within their maximum size", async function() {
+      const alice = await connect("chimpy@getgrist.com");
+      await call(alice, "openEncryptedDoc", docId);
+      const env = new testUtils.EnvironmentSnapshot();
+      try {
+        process.env.GRIST_ENCRYPTION_MAX_DOC_SIZE_MB = "1";
+        await assert.isRejected(call(alice, "uploadEncryptedFile", docId, Buffer.alloc(2e6).toString("base64")),
+          /maximum size/);
+      } finally {
+        env.restore();
+      }
+      await call(alice, "uploadEncryptedFile", docId, Buffer.alloc(2e6).toString("base64"));
+    });
+
+    it("never takes away the last copies of a key", async function() {
+      // A document whose key only Bob holds.
+      const soleDocId = await owner.newDoc({ name: "sole", options: { encryption: { version: 1 } } }, wsId);
+      const alice = await connect("chimpy@getgrist.com");
+      await call(alice, "openEncryptedDoc", soleDocId);
+      await call(alice, "createEncryptionKey", soleDocId,
+        { scope: DOC_SCOPE, keyId: "doc~sole", baseActionNum: 0, wraps: [wrap(ids["chimpy@getgrist.com"])] });
+      await call(alice, "shareEncryptionKeys", soleDocId, [wrap(ids["charon@getgrist.com"], "doc~sole")]);
+      await call(alice, "revokeEncryptionKeys", soleDocId, [ids["chimpy@getgrist.com"]]);
+      // Bob loses access (e.g. by mistake): his copy stays, so that it can be given back.
+      await owner.updateWorkspacePermissions(wsId, { users: { "charon@getgrist.com": null } });
+      home.dbManager.flushDocAuthCache();
+      await call(alice, "listEncryptionMembers", soleDocId);
+      const wraps = await home.dbManager.connection.manager.find(DocEncryptionKeyWrap, { where: { docId: soleDocId } });
+      assert.deepEqual(wraps.map(w => w.userId), [ids["charon@getgrist.com"]]);
+      await owner.updateWorkspacePermissions(wsId, { users: { "charon@getgrist.com": "editors" } });
+      home.dbManager.flushDocAuthCache();
+      const bob = await connect("charon@getgrist.com");
+      assert.deepEqual((await call(bob, "getEncryptionKeys", soleDocId)).myKeys.map((k: any) => k.keyId), ["doc~sole"]);
     });
 
     it("stops forwarding changes to members who lost access", async function() {

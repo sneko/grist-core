@@ -5,6 +5,7 @@ import * as kf from "app/client/lib/koForm";
 import { makeT } from "app/client/lib/localization";
 import { addToSort, updatePositions } from "app/client/lib/sortUtil";
 import { ViewSectionRec } from "app/client/models/DocModel";
+import { reportError } from "app/client/models/errors";
 import { ObjObservable } from "app/client/models/modelUtil";
 import { cssIcon, cssRow, cssSortFilterColumn } from "app/client/ui/RightPanelStyles";
 import { dropdownWithSearch } from "app/client/ui/searchDropdown";
@@ -260,7 +261,7 @@ export class SortConfig extends Disposable {
     return dom.maybe(this._section.isSorted, () =>
       cssButtonRow(
         textButton(t("Update data"),
-          dom.on("click", () => updatePositions(this._gristDoc, this._section)),
+          dom.on("click", () => updatePositions(this._gristDoc, this._section).catch(reportError)),
           testId("update"),
           dom.show(use => (
             use(use(this._section.table).supportsManualSort) &&

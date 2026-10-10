@@ -6,6 +6,7 @@ import { editableLabel } from "app/client/ui2018/editableLabel";
 import { icon } from "app/client/ui2018/icons";
 import { cssLink } from "app/client/ui2018/links";
 import { tokens } from "app/common/ThemePrefs";
+import { getGristConfig } from "app/common/urlUtils";
 
 import { BindableValue, dom, DomContents, Observable, styled } from "grainjs";
 import { tooltip } from "popweasel";
@@ -195,6 +196,12 @@ export function docBreadcrumbs(
       tooltip({ title: t("End-to-end encrypted: only members holding its key can read this document, " +
         "the server can't.") }),
       testId("encrypted-tag"),
+    ) : null,
+    // The stand-in for the encryption service (for tests and development) uses a known key.
+    (options.isEncrypted && getGristConfig().encryption?.mockVault) ? cssTag(t("INSECURE (mock)"),
+      tooltip({ title: t("This server uses a stand-in for the encryption service, with a known key: " +
+        "documents aren't actually protected. For tests and development only.") }),
+      testId("encrypted-mock-tag"),
     ) : null,
     dom.domComputed((use) => {
       if (options.isSnapshot && use(options.isSnapshot)) {

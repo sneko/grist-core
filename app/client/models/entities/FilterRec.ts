@@ -1,5 +1,6 @@
 import { ColumnRec, DocModel, IRowModel, refRecord, ViewSectionRec } from "app/client/models/DocModel";
 import * as modelUtil from "app/client/models/modelUtil";
+import { isLockedCell } from "app/common/encryption/LockedCell";
 
 import * as ko from "knockout";
 
@@ -18,6 +19,7 @@ export function createFilterRec(this: FilterRec, docModel: DocModel): void {
 
   // Observable for the active filter that's initialized from the value saved to the server.
   this.activeFilter = modelUtil.customComputed({
-    read: () => { const f = this.filter(); return f === "null" ? "" : f; }, // To handle old empty filters.
+    // To handle old empty filters, and private ones of encrypted documents the user can't read.
+    read: () => { const f = this.filter(); return (f === "null" || isLockedCell(f)) ? "" : f; },
   });
 }

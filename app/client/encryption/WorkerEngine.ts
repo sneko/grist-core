@@ -14,13 +14,19 @@ export class WorkerEngine implements IDataEngine {
   public static async create(): Promise<WorkerEngine> {
     const worker = await createWorker(new URL(WORKER_BUNDLE, document.baseURI).href);
     const engine = new WorkerEngine(worker);
-    await engine._init(`${window.location.origin}/encryption-engine`);
+    try {
+      await engine._init(`${window.location.origin}/encryption-engine`);
+    } catch (e) {
+      engine.terminate();
+      throw e;
+    }
     return engine;
   }
 
   private _nextId = 1;
   private _pending = new Map<number, { resolve: (v: any) => void, reject: (e: Error) => void }>();
   private _ready?: { resolve: () => void, reject: (e: Error) => void };
+  private _terminated = false;
 
   private constructor(private _worker: Worker) {
     _worker.onmessage = (event: MessageEvent) => this._onMessage(event.data);
@@ -41,11 +47,15 @@ export class WorkerEngine implements IDataEngine {
   }
 
   public terminate() {
+    if (this._terminated) { return; }
+    this._terminated = true;
     this._worker.terminate();
     this._fail(new Error("Engine stopped"));
   }
 
   private _request(message: object): Promise<any> {
+    // (A terminated worker would never answer.)
+    if (this._terminated) { return Promise.reject(new Error("Engine stopped")); }
     const id = this._nextId++;
     return new Promise((resolve, reject) => {
       this._pending.set(id, { resolve, reject });
@@ -91,6 +101,12 @@ async function createWorker(url: string): Promise<Worker> {
   // Static assets may be served from another origin (e.g. a CDN), which workers can't be
   // started from directly; go through a same-origin blob URL instead.
   const resp = await fetch(url);
+  if (!resp.ok) { throw new Error(`Could not load the data engine: ${resp.status}`); }
   const blobUrl = URL.createObjectURL(new Blob([await resp.text()], { type: "text/javascript" }));
-  return new Worker(blobUrl);
+  try {
+    return new Worker(blobUrl);
+  } finally {
+    // The worker has its script once started.
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+  }
 }

@@ -30,11 +30,13 @@ export interface DocEncryptionOptions {
   version: 1;
 }
 
-/** Whether a document (given its home database options) is encrypted. */
-export function isEncryptedDoc(
-  doc: { options?: { encryption?: DocEncryptionOptions | null } | null } | null | undefined,
-): boolean {
-  return Boolean(doc?.options?.encryption);
+/**
+ * Whether a document (given its home database options) is encrypted. Takes any resource (sites
+ * and workspaces never are).
+ */
+export function isEncryptedDoc(doc: object | null | undefined): boolean {
+  type WithOptions = { options?: { encryption?: DocEncryptionOptions | null } | null } | null | undefined;
+  return Boolean((doc as WithOptions)?.options?.encryption);
 }
 
 export const ENCRYPTED_DOC_SERVER_ERROR = "This document is end-to-end encrypted: " +
@@ -57,6 +59,12 @@ export interface EngineManifest {
 export type Base64 = string;
 
 /**
+ * Snapshots and files bigger than this travel by parts of this size (a websocket message can't
+ * exceed 100MB).
+ */
+export const ENCRYPTED_PART_BYTES = 8 * 1024 * 1024;
+
+/**
  * An entry of the document's history, as stored and relayed by the server:
  *  - "change": a change, encrypted with the document key keyId;
  *  - "key": the creation of a new key keyId (e.g. after the previous one of its scope got
@@ -75,7 +83,10 @@ export interface EncryptedActionRecord {
 export interface EncryptedSnapshotRecord {
   actionNum: number;
   keyId: string;
+  // The encrypted snapshot, if small enough to be returned whole. Otherwise empty: it's fetched
+  // by parts (fetchEncryptedSnapshot), up to `size` bytes.
   payload: Base64;
+  size: number;
   timeMs: number;
 }
 

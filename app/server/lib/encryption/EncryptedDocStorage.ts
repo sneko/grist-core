@@ -5,13 +5,17 @@
  *  - the document's history, as a linear series of encrypted changes (and key changes);
  *  - encrypted snapshots of the whole document, so that opening it doesn't require replaying
  *    its whole history;
- *  - encrypted files (attachments).
+ *  - encrypted files (attachments);
+ *  - uploads in progress, for snapshots and files too big for a single message.
  *
  * The server can't read any of it. The one rule it enforces is ordering: a change is accepted
  * only if it was computed on top of the latest one. A document is only served by the doc worker
  * it's assigned to, and all writes to one document go through a mutex, so that's safe.
  */
-import { Base64, EncryptedActionRecord, EncryptedSnapshotRecord } from "app/common/encryption/EncryptionTypes";
+import { ApiError } from "app/common/ApiError";
+import {
+  Base64, ENCRYPTED_PART_BYTES, EncryptedActionRecord, EncryptedSnapshotRecord,
+} from "app/common/encryption/EncryptionTypes";
 import { IDocStorageManager } from "app/server/lib/IDocStorageManager";
 import log from "app/server/lib/log";
 import { OpenMode, SchemaInfo, SQLiteDB } from "app/server/lib/SQLiteDB";
@@ -20,73 +24,69 @@ import * as crypto from "crypto";
 
 import { Mutex } from "async-mutex";
 
-// How many snapshots to keep. Changes up to the oldest one kept are deleted.
-const SNAPSHOTS_KEPT = 2;
+// How many snapshots to keep. Changes up to the oldest one kept are deleted: older states remain
+// available in the storage manager's own snapshots of the file (when it keeps any).
+const SNAPSHOTS_KEPT = 5;
 
 // Limit on how many changes a single fetch returns; callers fetch again for more.
 const MAX_ACTIONS_PER_FETCH = 500;
 
+// Snapshots and files are returned whole if no bigger than this, and by parts otherwise.
+export const MAX_INLINE_BYTES = ENCRYPTED_PART_BYTES;
+
+// Uploads not completed after this long are dropped.
+const UPLOAD_EXPIRY_MS = 60 * 60 * 1000;
+
 // Files are closed (and synced to external storage) after this long without use.
 const IDLE_CLOSE_MS = 60 * 1000;
 
+const CREATE_TABLES = `
+  CREATE TABLE IF NOT EXISTS _gristsys_EncryptedActions (
+    actionNum INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    keyId TEXT NOT NULL,
+    payload BLOB,
+    userId INTEGER,
+    timeMs INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS _gristsys_EncryptedSnapshots (
+    actionNum INTEGER PRIMARY KEY,
+    keyId TEXT NOT NULL,
+    payload BLOB NOT NULL,
+    userId INTEGER,
+    timeMs INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS _gristsys_EncryptedFiles (
+    fileId TEXT PRIMARY KEY,
+    payload BLOB NOT NULL,
+    userId INTEGER,
+    timeMs INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS _gristsys_EncryptedUploads (
+    uploadId TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    data BLOB NOT NULL,
+    userId INTEGER,
+    timeMs INTEGER NOT NULL,
+    PRIMARY KEY (uploadId, seq)
+  );
+`;
+
 const SCHEMA: SchemaInfo = {
-  async create(db) {
-    await db.exec(`
-      CREATE TABLE _gristsys_EncryptedActions (
-        actionNum INTEGER PRIMARY KEY,
-        kind TEXT NOT NULL,
-        keyId TEXT NOT NULL,
-        payload BLOB,
-        userId INTEGER,
-        timeMs INTEGER NOT NULL
-      );
-      CREATE TABLE _gristsys_EncryptedSnapshots (
-        actionNum INTEGER PRIMARY KEY,
-        keyId TEXT NOT NULL,
-        payload BLOB NOT NULL,
-        userId INTEGER,
-        timeMs INTEGER NOT NULL
-      );
-      CREATE TABLE _gristsys_EncryptedFiles (
-        fileId TEXT PRIMARY KEY,
-        payload BLOB NOT NULL,
-        userId INTEGER,
-        timeMs INTEGER NOT NULL
-      );
-    `);
-  },
+  async create(db) { await db.exec(CREATE_TABLES); },
+  // (Each migration creates whatever tables are missing.)
   migrations: [
-    async (db) => {
-      await db.exec(`
-        CREATE TABLE _gristsys_EncryptedActions (
-          actionNum INTEGER PRIMARY KEY,
-          kind TEXT NOT NULL,
-          keyId TEXT NOT NULL,
-          payload BLOB,
-          userId INTEGER,
-          timeMs INTEGER NOT NULL
-        );
-        CREATE TABLE _gristsys_EncryptedSnapshots (
-          actionNum INTEGER PRIMARY KEY,
-          keyId TEXT NOT NULL,
-          payload BLOB NOT NULL,
-          userId INTEGER,
-          timeMs INTEGER NOT NULL
-        );
-        CREATE TABLE _gristsys_EncryptedFiles (
-          fileId TEXT PRIMARY KEY,
-          payload BLOB NOT NULL,
-          userId INTEGER,
-          timeMs INTEGER NOT NULL
-        );
-      `);
-    },
+    async (db) => { await db.exec(CREATE_TABLES); },
+    async (db) => { await db.exec(CREATE_TABLES); },
   ],
 };
 
 export type AppendResult =
   { accepted: true, action: EncryptedActionRecord } |
   { accepted: false, head: number };
+
+/** A payload as given by browsers: inline, or as a completed upload (see beginUpload()). */
+export type PayloadSource = Base64 | { uploadId: string };
 
 /** One open document file. Use only through EncryptedDocStorage.withDoc(). */
 export class EncryptedDocFile {
@@ -100,11 +100,33 @@ export class EncryptedDocFile {
     return row?.head || 0;
   }
 
+  /** How many bytes the file takes. */
+  public async getSize(): Promise<number> {
+    const pages = await this.db.get("PRAGMA page_count");
+    const pageSize = await this.db.get("PRAGMA page_size");
+    return (pages?.page_count || 0) * (pageSize?.page_size || 0);
+  }
+
+  /**
+   * The latest snapshot. Its payload is included only if it's small enough: otherwise it's empty,
+   * and `size` tells how much to fetch with readSnapshot().
+   */
   public async getLatestSnapshot(): Promise<EncryptedSnapshotRecord | null> {
     const row = await this.db.get(
-      "SELECT actionNum, keyId, payload, timeMs FROM _gristsys_EncryptedSnapshots ORDER BY actionNum DESC LIMIT 1");
-    return row ? { actionNum: row.actionNum, keyId: row.keyId, payload: toBase64(row.payload), timeMs: row.timeMs } :
-      null;
+      "SELECT actionNum, keyId, length(payload) AS size, timeMs FROM _gristsys_EncryptedSnapshots " +
+      "ORDER BY actionNum DESC LIMIT 1");
+    if (!row) { return null; }
+    const payload = row.size <= MAX_INLINE_BYTES ? await this.readSnapshot(row.actionNum, 0, row.size) : "";
+    return { actionNum: row.actionNum, keyId: row.keyId, payload, size: row.size, timeMs: row.timeMs };
+  }
+
+  /** Returns part of a snapshot's payload. */
+  public async readSnapshot(actionNum: number, offset: number, length: number): Promise<Base64> {
+    const row = await this.db.get(
+      "SELECT substr(payload, ?, ?) AS part FROM _gristsys_EncryptedSnapshots WHERE actionNum = ?",
+      offset + 1, length, actionNum);
+    if (!row) { throw new ApiError("Snapshot not found: the document may have changed, please reload it", 404); }
+    return toBase64(row.part);
   }
 
   public async hasSnapshot(): Promise<boolean> {
@@ -142,29 +164,36 @@ export class EncryptedDocFile {
    * snapshot for actionNum 0 is the initial state of the document: it can only be saved once.
    * Returns false if the snapshot was of no use (e.g. a newer one exists).
    */
-  public async saveSnapshot(actionNum: number, keyId: string, payload: Base64,
+  public async saveSnapshot(actionNum: number, keyId: string, source: PayloadSource,
     userId: number | null, options: { compact?: boolean } = {}): Promise<boolean> {
     return this.db.execTransaction(async () => {
       const head = await this.getHead();
       if (actionNum > head || actionNum < 0) {
         throw new Error(`Snapshot for change ${actionNum} doesn't match the document (at ${head})`);
       }
-      const existing: number[] = (await this.db.all(
-        "SELECT actionNum FROM _gristsys_EncryptedSnapshots ORDER BY actionNum DESC")).map(r => r.actionNum);
+      const rows = (await this.db.all(
+        "SELECT actionNum, keyId FROM _gristsys_EncryptedSnapshots ORDER BY actionNum DESC")) as
+        { actionNum: number, keyId: string }[];
+      const existing = rows.map(r => r.actionNum);
       if (actionNum === 0 && existing.length > 0) {
         throw new Error("Encrypted document is already initialized");
       }
-      if (existing.length > 0 && (actionNum < existing[0] || (actionNum === existing[0] && !options.compact))) {
+      // The same state saved again is of no use, unless compacting, or re-encrypting it with a
+      // new key (members given only the new key need it).
+      if (existing.length > 0 && (actionNum < existing[0] ||
+        (actionNum === existing[0] && !options.compact && rows[0].keyId === keyId))) {
         // The same state or a newer one is saved already.
+        await this._dropUpload(source);
         return false;
       }
-      // Compacting replaces even a snapshot of the same state (e.g. re-encrypted with a new key).
+      const payload = await this._takePayload(source);
+      // A snapshot of the same state gets replaced.
       await this.db.run("DELETE FROM _gristsys_EncryptedSnapshots WHERE actionNum = ?", actionNum);
       await this.db.run(
         "INSERT INTO _gristsys_EncryptedSnapshots (actionNum, keyId, payload, userId, timeMs) VALUES (?, ?, ?, ?, ?)",
-        actionNum, keyId, fromBase64(payload), userId, Date.now());
-      // When compacting, only this snapshot is kept (e.g. so that content encrypted with a key
-      // someone shouldn't have anymore, or made private, isn't available anymore).
+        actionNum, keyId, payload, userId, Date.now());
+      // When compacting, only this snapshot is kept (so that content made private isn't
+      // available anymore in readable form).
       const kept = options.compact ? [actionNum] :
         [actionNum, ...existing.filter(n => n !== actionNum)].slice(0, SNAPSHOTS_KEPT);
       const oldestKept = kept[kept.length - 1];
@@ -174,16 +203,67 @@ export class EncryptedDocFile {
     });
   }
 
-  public async saveFile(payload: Base64, userId: number | null): Promise<string> {
+  public async saveFile(source: PayloadSource, userId: number | null): Promise<string> {
     const fileId = crypto.randomBytes(16).toString("hex");
-    await this.db.run("INSERT INTO _gristsys_EncryptedFiles (fileId, payload, userId, timeMs) VALUES (?, ?, ?, ?)",
-      fileId, fromBase64(payload), userId, Date.now());
-    return fileId;
+    return this.db.execTransaction(async () => {
+      await this.db.run("INSERT INTO _gristsys_EncryptedFiles (fileId, payload, userId, timeMs) VALUES (?, ?, ?, ?)",
+        fileId, await this._takePayload(source), userId, Date.now());
+      return fileId;
+    });
   }
 
-  public async getFile(fileId: string): Promise<Base64 | null> {
-    const row = await this.db.get("SELECT payload FROM _gristsys_EncryptedFiles WHERE fileId = ?", fileId);
-    return row ? toBase64(row.payload) : null;
+  /** A file's size, or null if there's no such file. */
+  public async getFileSize(fileId: string): Promise<number | null> {
+    const row = await this.db.get("SELECT length(payload) AS size FROM _gristsys_EncryptedFiles WHERE fileId = ?",
+      fileId);
+    return row ? row.size : null;
+  }
+
+  /** Returns part of a file. */
+  public async readFile(fileId: string, offset: number, length: number): Promise<Base64 | null> {
+    const row = await this.db.get(
+      "SELECT substr(payload, ?, ?) AS part FROM _gristsys_EncryptedFiles WHERE fileId = ?",
+      offset + 1, length, fileId);
+    return row ? toBase64(row.part) : null;
+  }
+
+  /** Starts an upload, for a payload too big for a single message. Returns its id. */
+  public async beginUpload(): Promise<string> {
+    await this.db.run("DELETE FROM _gristsys_EncryptedUploads WHERE timeMs < ?", Date.now() - UPLOAD_EXPIRY_MS);
+    return crypto.randomBytes(16).toString("hex");
+  }
+
+  /** Adds the part number `seq` (starting at 0) of an upload. Returns the upload's size so far. */
+  public async appendUpload(uploadId: string, seq: number, chunk: Base64, userId: number | null): Promise<number> {
+    if (seq > 0 && !await this.db.get(
+      "SELECT 1 FROM _gristsys_EncryptedUploads WHERE uploadId = ? AND seq = ?", uploadId, seq - 1)) {
+      throw new ApiError("Unknown or expired upload", 404);
+    }
+    await this.db.run(
+      "INSERT OR REPLACE INTO _gristsys_EncryptedUploads (uploadId, seq, data, userId, timeMs) VALUES (?, ?, ?, ?, ?)",
+      uploadId, seq, fromBase64(chunk), userId, Date.now());
+    return this.getUploadSize(uploadId);
+  }
+
+  public async getUploadSize(uploadId: string): Promise<number> {
+    const row = await this.db.get(
+      "SELECT SUM(length(data)) AS size FROM _gristsys_EncryptedUploads WHERE uploadId = ?", uploadId);
+    return row?.size || 0;
+  }
+
+  // Returns the bytes of a payload, consuming the upload it's in, if any.
+  private async _takePayload(source: PayloadSource): Promise<Buffer> {
+    if (typeof source === "string") { return fromBase64(source); }
+    const rows = await this.db.all(
+      "SELECT data FROM _gristsys_EncryptedUploads WHERE uploadId = ? ORDER BY seq", source.uploadId);
+    if (rows.length === 0) { throw new ApiError("Unknown or expired upload", 404); }
+    await this._dropUpload(source);
+    return Buffer.concat(rows.map(r => Buffer.from(r.data)));
+  }
+
+  private async _dropUpload(source: PayloadSource) {
+    if (typeof source === "string") { return; }
+    await this.db.run("DELETE FROM _gristsys_EncryptedUploads WHERE uploadId = ?", source.uploadId);
   }
 }
 
@@ -259,8 +339,8 @@ function toActionRecord(row: any): EncryptedActionRecord {
   };
 }
 
-function toBase64(bytes: Uint8Array): Base64 {
-  return Buffer.from(bytes).toString("base64");
+function toBase64(bytes: Uint8Array | null): Base64 {
+  return bytes ? Buffer.from(bytes).toString("base64") : "";
 }
 
 function fromBase64(payload: Base64): Buffer {

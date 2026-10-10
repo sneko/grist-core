@@ -108,6 +108,12 @@ jobs:
       - name: Build Node.js code
         run: yarn run build
 
+      # End-to-end encrypted documents run the data engine in the browser, in Pyodide: their
+      # server and browser tests need its assets.
+      - name: Prepare pyodide for encrypted documents
+        if: contains(matrix.tests, ':server-') || contains(matrix.tests, ':nbrowser-')
+        run: make -C sandbox/pyodide setup
+
       - name: Check nbrowser test-group coverage
         if: contains(matrix.tests, ':lint:')
         run: node buildtools/check_test_groups.js

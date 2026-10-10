@@ -164,7 +164,9 @@ export class DocSettingsPage extends Disposable {
         dom.create(buildEncryptionSettings, this._gristDoc),
       ]) : null,
 
-      isEncrypted ? null : dom.create(buildNotificationsConfig, this._gristDoc.appModel, this._gristDoc.docApi,
+      // (For encrypted documents, notifications can only say that the document changed, and who
+      // changed it: the server can't read it.)
+      dom.create(buildNotificationsConfig, this._gristDoc.appModel, this._gristDoc.docApi,
         docPageModel.currentDoc.get()),
 
       isEncrypted ? null : SectionCard(t("Data engine"), [
@@ -209,7 +211,8 @@ document is first opened, or when a document responds to changes.",
         }),
       ]),
 
-      isEncrypted ? null : SectionCard(t("API"), [
+      // (For encrypted documents, the REST API only manages the document, not its data.)
+      SectionCard(t("API"), [
         SectionItem({
           id: "documentId",
           name: t("Document ID"),
@@ -249,7 +252,7 @@ document is first opened, or when a document responds to changes.",
             ]),
           ),
         }),
-        SectionItem({
+        isEncrypted ? null : SectionItem({
           id: "api-console",
           name: t("API console"),
           description: t("Try API calls from the browser"),
@@ -258,7 +261,7 @@ document is first opened, or when a document responds to changes.",
             href: getApiConsoleLink(docPageModel),
           }),
         }),
-        this._gristDoc.docPageModel.isFork.get() ? null : SectionItem({
+        (this._gristDoc.docPageModel.isFork.get() || isEncrypted) ? null : SectionItem({
           id: "webhooks",
           name: t("Webhooks"),
           description: t("Notify other services on doc changes"),

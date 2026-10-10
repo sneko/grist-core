@@ -143,7 +143,7 @@ os.environ['IMPORTDIR'] = '${IMPORT_DIR}'
     const marshaller = new marshal.Marshaller({ stringToBuffer: false, version: 2 });
     try {
       const [funcName, ...args] = marshal.loads(buf, { bufferToString: true });
-      const func = this._exports[funcName];
+      const func = Object.prototype.hasOwnProperty.call(this._exports, funcName) ? this._exports[funcName] : null;
       if (!func) { throw new Error(`No such exported function: ${funcName}`); }
       const result = func(...args);
       if (result && typeof result.then === "function") {

@@ -34,6 +34,10 @@ export class DocEncryption1791565390867 implements MigrationInterface {
         { columnNames: ["doc_id"], referencedTableName: "docs", referencedColumnNames: ["id"], onDelete: "CASCADE" },
       ],
     }));
+    // A scope has one current key at most (enforced here too, against concurrent creations).
+    await queryRunner.query(
+      "CREATE UNIQUE INDEX doc_encryption_keys__current ON doc_encryption_keys (doc_id, scope) " +
+      "WHERE retired_at IS NULL");
     await queryRunner.createTable(new Table({
       name: "doc_encryption_key_wraps",
       columns: [
@@ -81,6 +85,7 @@ export class DocEncryption1791565390867 implements MigrationInterface {
   public async down(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.dropTable("doc_encryption_scopes");
     await queryRunner.dropTable("doc_encryption_key_wraps");
+    await queryRunner.query("DROP INDEX doc_encryption_keys__current");
     await queryRunner.dropTable("doc_encryption_keys");
   }
 }

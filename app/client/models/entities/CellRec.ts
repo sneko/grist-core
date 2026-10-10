@@ -2,6 +2,7 @@ import { KoArray } from "app/client/lib/koArray";
 import { ColumnRec, DocModel, IRowModel, recordSet, refRecord, TableRec } from "app/client/models/DocModel";
 import { jsonObservable } from "app/client/models/modelUtil";
 import * as modelUtil from "app/client/models/modelUtil";
+import { isLockedCell } from "app/common/encryption/LockedCell";
 import { isCensored } from "app/common/gristTypes";
 
 import * as ko from "knockout";
@@ -21,7 +22,8 @@ export interface CellRec extends IRowModel<"_grist_Cells"> {
 }
 
 export function createCellRec(this: CellRec, docModel: DocModel): void {
-  this.hidden = ko.pureComputed(() => isCensored(this.content()));
+  // (Comments on private cells of encrypted documents are locked for those who can't read them.)
+  this.hidden = ko.pureComputed(() => isCensored(this.content()) || isLockedCell(this.content()));
   this.column = refRecord(docModel.columns, this.colRef);
   this.table = refRecord(docModel.tables, this.tableRef);
   this.parent = refRecord(docModel.cells, this.parentId);

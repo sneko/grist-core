@@ -714,6 +714,8 @@ function buildDocInfo(doc: Document, mode: OpenDocMode | undefined): DocInfo {
     }
   }
 
+  // End-to-end encrypted documents can't be copied by the server: they're never opened as forks.
+  if (isEncryptedDoc(doc)) { openMode = "default"; }
   const isPreFork = openMode === "fork";
   const isTemplate = type === DOCTYPE_TEMPLATE && (isFork || isPreFork);
   // A document can be held read-only whatever the access level, so check both.

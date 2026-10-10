@@ -2,6 +2,7 @@
 
 // Grist client libs
 import { DocComm } from "app/client/components/DocComm";
+import { guardDocApi } from "app/client/encryption/serverDataGuard";
 import { makeT } from "app/client/lib/localization";
 import { checkBrowserUploadSizeLimit, selectPicker } from "app/client/lib/uploads";
 import { DocData } from "app/client/models/DocData";
@@ -15,10 +16,12 @@ import { IModalControl, modal } from "app/client/ui2018/modals";
 import { renderFileType } from "app/client/widgets/AttachmentsWidget";
 import { FieldOptions, NewBaseEditor } from "app/client/widgets/NewBaseEditor";
 import { CellValue } from "app/common/DocActions";
+import { isLockedCell } from "app/common/encryption/LockedCell";
 import { clamp } from "app/common/gutil";
 import { SingleCell } from "app/common/TableData";
 import { UploadResult } from "app/common/uploads";
 import { DocAPI } from "app/common/UserAPI";
+import { LOCKED_CELL_TEXT } from "app/common/ValueFormatter";
 
 import { dom, LiveIndex, makeLiveIndex, styled } from "grainjs";
 import { MutableObsArray, obsArray, ObsArray, observable, Observable } from "grainjs";
@@ -41,6 +44,9 @@ interface Attachment {
 
   // Whether the attachment is an image, indicated by the presence of imageHeight in the record.
   hasPreview: boolean;
+  // Set for attachments of encrypted documents, whose type comes from their name only (which any
+  // member can set): only safe types get embedded.
+  encrypted?: boolean;
 
   // The download URL of the attachment; served with Content-Disposition of "attachment".
   url: Observable<string>;
@@ -64,6 +70,7 @@ export class AttachmentsEditor extends NewBaseEditor {
   private _index: LiveIndex;
   private _selected: Computed<Attachment | null>;
   private _target: { tableId: string, colId: string };
+  private _encryptedUrlLoaders = new Map<number, () => void>();
 
   constructor(options: FieldOptions) {
     super(options);
@@ -84,8 +91,8 @@ export class AttachmentsEditor extends NewBaseEditor {
     this._docComm = docData.docComm;
     // View-as-aware so preview/download URLs respect ACLs. Harmless on the upload path: /uploads
     // is access-agnostic, and the real gating is on the WebSocket calls that follow.
-    this._docApi = options.gristDoc.appModel.api.getDocAPI(options.gristDoc.docId(),
-      { propagateViewAs: true });
+    this._docApi = guardDocApi(options.gristDoc.appModel.api.getDocAPI(options.gristDoc.docId(),
+      { propagateViewAs: true }), this._docComm.isEncrypted);
 
     this._rowIds = obsArray(Array.isArray(cellValue) ? cellValue.slice(1) as number[] : []);
     this._attachments = computedArray(this._rowIds, (val: number): Attachment => {
@@ -93,14 +100,16 @@ export class AttachmentsEditor extends NewBaseEditor {
       // (Encrypted documents' fileIdent has no extension: then look at the file's name.)
       const fileType = mimeTypes.lookup(fileIdent) ||
         mimeTypes.lookup(this._attachmentsTable.getValue(val, "fileName") || "") || "application/octet-stream";
-      const filename: Observable<string> =
-        observable(this._attachmentsTable.getValue(val, "fileName")!);
+      // (Names of files attached in private columns are locked for those who can't read them.)
+      const name = this._attachmentsTable.getValue(val, "fileName")!;
+      const filename: Observable<string> = observable(isLockedCell(name) ? LOCKED_CELL_TEXT : name);
       return {
         rowId: val,
         fileIdent,
         fileType,
         filename,
         hasPreview: Boolean(this._attachmentsTable.getValue(val, "imageHeight")),
+        encrypted: Boolean(this._docComm.getEncryptedAttachmentUrl),
         url: this._makeUrl(cell, val, filename),
         inlineUrl: this._makeUrl(cell, val, filename, true),
       };
@@ -110,6 +119,10 @@ export class AttachmentsEditor extends NewBaseEditor {
       const index = use(this._index);
       return index === null ? null : use(this._attachments)[index];
     }));
+    // Encrypted attachments get fetched and decrypted when shown.
+    const loadSelected = (att: Attachment | null) => { if (att) { this._encryptedUrlLoaders.get(att.rowId)?.(); } };
+    this.autoDispose(this._selected.addListener(loadSelected));
+    loadSelected(this._selected.get());
     this._isUploading = Observable.create(this, false);
   }
 
@@ -230,7 +243,14 @@ export class AttachmentsEditor extends NewBaseEditor {
     const getEncryptedUrl = this._docComm.getEncryptedAttachmentUrl;
     if (!getEncryptedUrl) { return computed(use => this._getUrl(cell, attId, use(filename), inline)); }
     const url = observable("");
-    getEncryptedUrl(attId).then(u => url.set(u)).catch(reportError);
+    const previous = this._encryptedUrlLoaders.get(attId);
+    let loaded = false;
+    this._encryptedUrlLoaders.set(attId, () => {
+      previous?.();
+      if (loaded) { return; }
+      loaded = true;
+      getEncryptedUrl(attId).then(u => url.set(u)).catch(reportError);
+    });
     return url;
   }
 
@@ -353,6 +373,12 @@ function renderContent(att: Attachment | null, readonly: boolean): HTMLElement {
   } else if (att.fileType.startsWith("text/") || att.fileType === "application/json") {
     // Rendering text/html is risky. Things like text/plain and text/csv we could render though,
     // but probably not using object tag (which needs work to look acceptable).
+    return dom("div", ...commonArgs,
+      cssWarning(cssContent.cls(""), renderFileType(att.filename.get(), att.fileIdent),
+        cssDetails(t("Preview not available."))));
+  } else if (att.encrypted && att.fileType !== "application/pdf") {
+    // An encrypted attachment is shown from a blob URL of this page's origin: don't let the
+    // browser interpret it as anything that could run.
     return dom("div", ...commonArgs,
       cssWarning(cssContent.cls(""), renderFileType(att.filename.get(), att.fileIdent),
         cssDetails(t("Preview not available."))));

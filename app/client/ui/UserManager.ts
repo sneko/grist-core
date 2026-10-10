@@ -331,7 +331,7 @@ export class UserManager extends Disposable {
           this._inheritRoleSelector(),
         ),
         // Encrypted documents must remain restricted to their members (who hold their key).
-        (publicMember && !isEncryptedDoc(this._options.resource as Parameters<typeof isEncryptedDoc>[0])) ?
+        (publicMember && !isEncryptedDoc(this._options.resource)) ?
           dom("span", { style: `float: right;` },
             cssSmallPublicMemberIcon("PublicFilled"),
             dom("span", t("Public access: ")),

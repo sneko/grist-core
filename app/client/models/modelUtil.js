@@ -2,6 +2,7 @@ var _ = require("underscore");
 var Promise = require("bluebird");
 var assert = require("assert");
 var gutil = require("app/common/gutil");
+var isLockedCell = require("app/common/encryption/LockedCell").isLockedCell;
 var ko = require("knockout");
 var koUtil = require("../lib/koUtil");
 
@@ -175,7 +176,8 @@ function jsonObservable(stringObservable, modifierFunc, optContext) {
   var obs = ko.pureComputed({
     read: function() { // reads the underlying string, parses, and passes through modFunc
       var json = stringObservable();
-      return modifierFunc.call(optContext, json ? JSON.parse(json) : null);
+      // (Settings of encrypted documents may be private, and locked for the user: then unknown.)
+      return modifierFunc.call(optContext, (json && !isLockedCell(json)) ? JSON.parse(json) : null);
     },
     write: function(obj) { // stringifies the given obj and sets the underlying string to that
       stringObservable(JSON.stringify(obj));

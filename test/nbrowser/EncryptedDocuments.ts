@@ -4,7 +4,7 @@
  * (hardcoded key) in place of the LaSuite encryption service.
  */
 import { decryptBundle, decryptSnapshot } from "app/common/encryption/EncryptedPayloads";
-import { bytesToBase64, MockKeyVault } from "app/common/encryption/EncryptionCrypto";
+import { MockKeyVault } from "app/common/encryption/EncryptionCrypto";
 import { DOC_SCOPE } from "app/common/encryption/EncryptionTypes";
 import { Keyring } from "app/common/encryption/Keyring";
 import { UserAPI } from "app/common/UserAPI";
@@ -64,11 +64,15 @@ describe("EncryptedDocuments", function() {
       "SELECT key_id AS \"keyId\", scope, action_num AS \"actionNum\" FROM doc_encryption_keys WHERE doc_id = ?",
       [docId]));
     const docKeys = keys.filter((k: any) => k.scope === DOC_SCOPE);
+    // Any member's copy of a key can be unwrapped by anyone knowing the mock vault's key.
+    const wraps = await (await server.getDatabase()).connection.query(
+      "SELECT key_id AS \"keyId\", wrapped_key AS \"wrappedKey\" FROM doc_encryption_key_wraps WHERE doc_id = ?",
+      [docId]);
     const keyring = new Keyring(new MockKeyVault(), async () => { throw new Error("no fetching"); }, {
       keys: keys.map((k: any) => ({ ...k, current: true, rotateOnNextEdit: false })),
       myKeys: docKeys.map((k: any) => ({
         keyId: k.keyId, userId: 0, keyVersion: 1,
-        wrappedKey: bytesToBase64(new TextEncoder().encode("mock-wrap:test")),
+        wrappedKey: wraps.find((w: any) => w.keyId === k.keyId).wrappedKey,
       })),
       bindings: [],
     });
@@ -175,6 +179,35 @@ describe("EncryptedDocuments", function() {
       // The server only got it encrypted.
       assert.notInclude(await allStoredText(docId), "Lily");
       assert.include(await readableWithDocKeys(docId), "Lily");
+    });
+
+    it("never sends its data to the server through the REST API", async function() {
+      const result = await driver.executeAsyncScript<string[]>(`
+        const done = arguments[arguments.length - 1];
+        const docApi = window.gristDocPageModel.gristDoc.get().docApi;
+        const file = new File(["Leaked?"], "leak.csv", { type: "text/csv" });
+        Promise.allSettled([docApi.upload([file]), docApi.addRows("Table1", { A: ["Leaked?"] })])
+          .then(results => done(results.map(r => r.status === "rejected" ? String(r.reason) : "sent")));
+      `);
+      for (const outcome of result) { assert.match(outcome, /end-to-end encrypted/); }
+    });
+
+    it("exports widgets from the browser, including to Excel", async function() {
+      const bytes = await driver.executeAsyncScript(`
+        const done = arguments[arguments.length - 1];
+        window.gristDocPageModel.gristDoc.get().docComm.encryption
+          .exportXlsx([["Table1", ["A"], [["Confidential"], [42]]]])
+          .then(data => done(Array.from(data.slice(0, 2))))
+          .catch(e => done(String(e)));
+      `);
+      // An .xlsx file is a zip file.
+      assert.deepEqual(bytes, [0x50, 0x4b]);
+      await driver.find(".test-tb-share").click();
+      await driver.findContentWait(".test-tb-share-option", /Export as/, 2000).click();
+      assert.isTrue(await driver.findContentWait(".test-tb-share-option", /Microsoft Excel \(\.xlsx\)/, 2000)
+        .isDisplayed());
+      await gu.sendKeys(Key.ESCAPE, Key.ESCAPE);
+      await driver.wait(async () => !(await driver.find(".grist-floating-menu").isPresent()), 2000);
     });
 
     it("hides what the server can't do for encrypted documents", async function() {

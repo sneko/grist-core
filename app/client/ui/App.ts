@@ -184,6 +184,9 @@ export class AppImpl extends DisposableWithEvents implements App {
       // Reload any open documents if needed (if clientId changed, or client can't get all missed
       // messages). We'll simply reload the active component of the App regardless of what it is.
       if (message.needReload) {
+        // End-to-end encrypted documents catch up by themselves (see EncryptedDocSession):
+        // reloading would mean reloading the data engine and the whole document.
+        if (G.window.gristDocPageModel?.gristDoc.get()?.docComm.isEncrypted) { return; }
         this._reloadPane();
       }
     });

@@ -4,8 +4,10 @@
  * columns, key replacement, and attachments.
  */
 import { TableDataAction } from "app/common/DocActions";
-import { EncryptionAccessError, LOCKED_CELL } from "app/common/encryption/ColumnPrivacy";
-import { decryptFile, encryptFile } from "app/common/encryption/EncryptedAttachments";
+import { EncryptionAccessError, isLockedCell, LOCKED_CELL } from "app/common/encryption/ColumnPrivacy";
+import {
+  decryptFile, EncryptedFileRef, encryptFile, makeFileIdent, parseFileIdent,
+} from "app/common/encryption/EncryptedAttachments";
 import {
   decryptBundle, decryptSnapshot, DocChangeBundle, encryptBundle,
 } from "app/common/encryption/EncryptedPayloads";
@@ -13,7 +15,7 @@ import { base64ToBytes, bytesToBase64, MockKeyVault } from "app/common/encryptio
 import {
   DOC_SCOPE, EncryptedActionRecord, makeColumnScope, makeKeyId,
 } from "app/common/encryption/EncryptionTypes";
-import { Keyring, MissingKeyError } from "app/common/encryption/Keyring";
+import { fromKeyRecord, Keyring, MissingKeyError } from "app/common/encryption/Keyring";
 import { InvalidChange, LocalActiveDoc, LocalDocUserAction } from "app/common/encryption/LocalActiveDoc";
 import { addParsedTables, parseFileLocally } from "app/common/encryption/LocalImport";
 import { User } from "app/common/User";
@@ -27,7 +29,7 @@ describe("encryption/LocalActiveDoc", function() {
 
   const vault = new MockKeyVault();
   const vaultIdFor = (m: { userId: number }) => `user-${m.userId}`;
-  const mockWrap = (userId: number) => bytesToBase64(new TextEncoder().encode(`mock-wrap:user-${userId}`));
+  const recipient = (m: MemoryMember) => ({ vaultUserId: vaultIdFor(m), email: m.email, name: m.name });
 
   const alice: MemoryMember = { userId: 1, email: "alice@example.com", name: "Alice", access: "owners" };
   const bob: MemoryMember = { userId: 2, email: "bob@example.com", name: "Bob", access: "editors" };
@@ -61,6 +63,8 @@ describe("encryption/LocalActiveDoc", function() {
       onInvalidChange: change => skipped.push(change),
       vaultIdFor,
       snapshotEvery: options.snapshotEvery,
+      // (Set DEBUG_ENCRYPTION to see what each browser does.)
+      log: process.env.DEBUG_ENCRYPTION ? (...args) => console.log(`[${member.name}]`, ...args) : undefined,
       newDocSettings: options.create ? { timezone: "Europe/Paris", locale: "fr-FR" } : undefined,
     }, relay.open(member.userId));
     client.doc = doc;
@@ -76,19 +80,29 @@ describe("encryption/LocalActiveDoc", function() {
   async function newRelay(...others: MemoryMember[]) {
     const relay = new MemoryRelay();
     for (const m of [alice, ...others]) { relay.addMember(m); }
+    const wrap = (await vault.createDocumentKey([recipient(alice)])).get(vaultIdFor(alice))!;
     relay.createKey(relay.connect(alice.userId), {
       scope: DOC_SCOPE, keyId: makeKeyId(DOC_SCOPE), baseActionNum: 0,
-      wraps: [{ userId: alice.userId, wrappedKey: mockWrap(alice.userId), keyVersion: 1 }],
+      wraps: [{ userId: alice.userId, wrappedKey: bytesToBase64(wrap.wrappedKey), keyVersion: 1 }],
     });
     return relay;
   }
 
   /** Gives members all the keys of a scope (as an owner holding them would). */
-  function giveKeys(relay: MemoryRelay, scope: string, ...members: MemoryMember[]) {
+  async function giveKeys(relay: MemoryRelay, scope: string, ...members: MemoryMember[]) {
     for (const key of relay.keys.filter(k => k.scope === scope)) {
-      relay.share(members.map(m =>
-        ({ keyId: key.keyId, userId: m.userId, wrappedKey: mockWrap(m.userId), keyVersion: 1 })));
+      const holderWrap = relay.wraps.find(w => w.keyId === key.keyId)!;
+      const wraps = await vault.shareDocumentKey(fromKeyRecord(holderWrap), members.map(recipient));
+      relay.share(members.map(m => ({
+        keyId: key.keyId, userId: m.userId, keyVersion: 1,
+        wrappedKey: bytesToBase64(wraps.get(vaultIdFor(m))!.wrappedKey),
+      })));
     }
+  }
+
+  /** A copy of each of the given keys, as someone holding them could get. */
+  function anyWraps(relay: MemoryRelay, keyIds: string[]) {
+    return keyIds.map(keyId => ({ ...relay.wraps.find(w => w.keyId === keyId)!, userId: 99 }));
   }
 
   async function tableValues(p: Participant, tableId: string): Promise<TableDataAction> {
@@ -100,8 +114,7 @@ describe("encryption/LocalActiveDoc", function() {
     const keyring = new Keyring(vault, async () => ({ keys: relay.keys, myKeys: [], bindings: relay.bindings }), {
       keys: relay.keys,
       bindings: relay.bindings,
-      myKeys: relay.keys.filter(k => k.scope === DOC_SCOPE)
-        .map(k => ({ keyId: k.keyId, userId: 99, wrappedKey: mockWrap(99), keyVersion: 1 })),
+      myKeys: anyWraps(relay, relay.keys.filter(k => k.scope === DOC_SCOPE).map(k => k.keyId)),
     });
     const parts: unknown[] = [];
     for (const record of relay.actions.filter(a => a.kind === "change")) {
@@ -139,7 +152,7 @@ describe("encryption/LocalActiveDoc", function() {
     before(async function() {
       relay = await newRelay(bob, dave);
       a = await join(relay, alice, { create: true, snapshotEvery: 5 });
-      giveKeys(relay, DOC_SCOPE, bob, dave);
+      await giveKeys(relay, DOC_SCOPE, bob, dave);
       b = await join(relay, bob, { snapshotEvery: 5 });
     });
 
@@ -305,6 +318,222 @@ describe("encryption/LocalActiveDoc", function() {
     });
   });
 
+  describe("ordering", function() {
+    let relay: MemoryRelay;
+    let ps: Participant[];
+
+    beforeEach(async function() {
+      relay = await newRelay(bob, carol);
+      const a = await join(relay, alice, { create: true, snapshotEvery: 7 });
+      await giveKeys(relay, DOC_SCOPE, bob, carol);
+      ps = [a, await join(relay, bob, { snapshotEvery: 7 }), await join(relay, carol, { snapshotEvery: 7 })];
+      await a.doc.applyUserActions([
+        ["AddTable", "Log", [
+          { id: "Who", type: "Text", isFormula: false },
+          { id: "N", type: "Int", isFormula: false },
+          { id: "Rand", type: "Any", isFormula: true, formula: "RANDBETWEEN(1, 1000000000) if $N else 0" },
+        ]],
+      ]);
+      for (const p of ps) { await p.doc.sync(); }
+    });
+
+    afterEach(function() {
+      for (const p of ps) { leave(relay, p); }
+    });
+
+    async function assertSameEverywhere() {
+      const tables = await Promise.all(ps.map(p => tableValues(p, "Log")));
+      for (const table of tables.slice(1)) { assert.deepEqual(table, tables[0]); }
+      return tables[0];
+    }
+
+    it("orders concurrent changes from several browsers the same way everywhere", async function() {
+      relay.holdBroadcasts = true;
+      // Each browser makes several changes at once, while others' changes are in flight.
+      await Promise.all(ps.map(async (p) => {
+        for (let i = 1; i <= 5; i++) {
+          await p.doc.applyUserActions([["AddRecord", "Log", null, { Who: p.member.name, N: i }]]);
+          if (i === 3) { await relay.releaseBroadcasts(); relay.holdBroadcasts = true; }
+        }
+      }));
+      await relay.releaseBroadcasts();
+      for (const p of ps) { await p.doc.sync(); }
+      assert.isAbove(relay.pushes.refused, 0);
+      // The history is linear, without gaps, and each change is in it once.
+      const changes = relay.actions.filter(a => a.kind === "change");
+      assert.deepEqual(changes.map(a => a.actionNum), changes.map((_, i) => changes[0].actionNum + i));
+      const table = await assertSameEverywhere();
+      assert.lengthOf(table[2], 15);
+      for (const name of ["Alice", "Bob", "Carol"]) {
+        // Each browser's own changes are in the order it made them.
+        const mine = table[2].map((_, i) => i).filter(i => table[3].Who[i] === name).map(i => table[3].N[i]);
+        assert.deepEqual(mine, [1, 2, 3, 4, 5]);
+      }
+      // Each browser saw every change, once, in order.
+      for (const p of ps) {
+        const nums = p.received.map(r => r.actionGroup.actionNum).filter(n => n > changes[0].actionNum - 1);
+        assert.deepEqual(nums, changes.map(a => a.actionNum));
+      }
+    });
+
+    it("fetches changes it missed, when they arrive out of order", async function() {
+      const [a, b] = ps;
+      relay.holdBroadcasts = true;
+      await a.doc.applyUserActions([["AddRecord", "Log", null, { Who: "first", N: 1 }]]);
+      await a.doc.applyUserActions([["AddRecord", "Log", null, { Who: "second", N: 2 }]]);
+      // Bob gets the second change first: he fetches the one he missed, and applies both in order.
+      const [first, second] = relay.actions.slice(-2);
+      await b.doc.receiveAction(second);
+      assert.equal(b.doc.head, second.actionNum);
+      await b.doc.receiveAction(first);   // (Already applied: ignored.)
+      assert.deepEqual((await tableValues(b, "Log"))[3].Who, ["first", "second"]);
+      relay.holdBroadcasts = false;
+      for (const p of ps) { await p.doc.sync(); }
+      await assertSameEverywhere();
+    });
+
+    it("applies a change once when the server's answer to it got lost", async function() {
+      const [a, b] = ps;
+      const realPush = a.client.pushAction.bind(a.client);
+      a.client.pushAction = async (...args) => {
+        await realPush(...args);
+        throw new Error("Connection lost");
+      };
+      try {
+        await assert.isRejected(a.doc.applyUserActions([["AddRecord", "Log", null, { Who: "once", N: 1 }]]),
+          /Connection lost/);
+      } finally {
+        a.client.pushAction = realPush;
+      }
+      // The change got through: Alice gets it back from the server, like everyone else.
+      await b.doc.sync();
+      const table = await assertSameEverywhere();
+      assert.deepEqual(table[3].Who, ["once"]);
+    });
+
+    it("rejects changes that aren't shaped as changes, everywhere alike", async function() {
+      const [a, b, c] = ps;
+      const keyId = relay.currentKey(DOC_SCOPE)!.keyId;
+      const malformed = { v: 1, userActions: [["Calculate"]], stored: [["AddRecord", "Log", 1, { Who: "x" }]] } as any;
+      const record = relay.pushRaw(carol.userId, keyId,
+        bytesToBase64(await encryptBundle(c.doc.keyring, keyId, malformed)));
+      for (const p of [a, b, c]) {
+        await p.doc.sync();
+        assert.deepInclude(p.skipped[p.skipped.length - 1], { actionNum: record.actionNum, skipped: true });
+        assert.match(p.skipped[p.skipped.length - 1].reason, /Malformed/);
+      }
+      await assertSameEverywhere();
+    });
+
+    it("keeps the current time up to date once for all", async function() {
+      const [a, b] = ps;
+      await a.doc.applyUserActions([["AddColumn", "Log", "Now", { type: "Any", isFormula: true, formula: "NOW()" }],
+        ["AddRecord", "Log", null, { Who: "t", N: 1 }]]);
+      await b.doc.sync();
+      // As if an hour had passed for everyone.
+      for (const p of ps) { (p.doc as any)._lastTimeUpdateMs = 0; }
+      const head = relay.head;
+      await a.doc.updateCurrentTime();
+      assert.equal(relay.head, head + 1);
+      // Others, getting the update, don't make their own.
+      await b.doc.sync();
+      await b.doc.updateCurrentTime();
+      assert.equal(relay.head, head + 1);
+      await assertSameEverywhere();
+    });
+  });
+
+  describe("replacing the document key while members edit", function() {
+    let relay: MemoryRelay;
+    let a: Participant;
+    let b: Participant;
+    let c: Participant;
+
+    beforeEach(async function() {
+      relay = await newRelay(bob, carol);
+      a = await join(relay, alice, { create: true });
+      await giveKeys(relay, DOC_SCOPE, bob, carol);
+      b = await join(relay, bob);
+      c = await join(relay, carol);
+      await a.doc.applyUserActions([
+        ["AddTable", "Notes", [{ id: "Text", type: "Text", isFormula: false }]],
+        ["AddRecord", "Notes", null, { Text: "start" }],
+      ]);
+      for (const p of [b, c]) { await p.doc.sync(); }
+    });
+
+    afterEach(function() {
+      for (const p of [a, b, c]) { leave(relay, p); }
+    });
+
+    /**
+     * Removes Carol from the document, as the server does when she loses access: her keys are
+     * taken away (and flagged for replacement), and changes are no longer forwarded to her.
+     */
+    function removeCarol() {
+      relay.revoke([carol.userId]);
+      relay.members = relay.members.filter(m => m.userId !== carol.userId);
+      relay.disconnect(c.client);
+    }
+
+    it("refuses changes made with the replaced key, and redoes them with the new one", async function() {
+      const oldKeyId = relay.currentKey(DOC_SCOPE)!.keyId;
+      removeCarol();
+      relay.holdBroadcasts = true;
+      // Alice's next edit replaces the key, while Bob, who hasn't heard of it yet, edits too.
+      await a.doc.refreshKeys();
+      await a.doc.applyUserActions([["AddRecord", "Notes", null, { Text: "from Alice" }]]);
+      const newKeyId = relay.currentKey(DOC_SCOPE)!.keyId;
+      assert.notEqual(newKeyId, oldKeyId);
+      const keyNum = relay.keys.find(k => k.keyId === newKeyId)!.actionNum;
+      await b.doc.applyUserActions([["AddRecord", "Notes", null, { Text: "from Bob" }]]);
+      await relay.releaseBroadcasts();
+      await b.doc.sync();
+      await a.doc.sync();
+
+      // Bob's first attempt, with the old key, was refused, and never reached anyone.
+      const bobPushes = relay.pushLog.filter(l => l.userId === bob.userId);
+      assert.deepInclude(bobPushes, { userId: bob.userId, baseActionNum: keyNum - 1, keyId: oldKeyId,
+        outcome: "refused" });
+      assert.isTrue(relay.actions.filter(r => r.actionNum > keyNum).every(r => r.keyId === newKeyId));
+      // His change was made again on top of the key change, with the new key, once.
+      const accepted = bobPushes.filter(l => l.outcome === "accepted");
+      assert.lengthOf(accepted, 1);
+      assert.equal(accepted[0].keyId, newKeyId);
+      assert.deepEqual((await tableValues(a, "Notes"))[3].Text, ["start", "from Alice", "from Bob"]);
+      assert.deepEqual(await tableValues(b, "Notes"), await tableValues(a, "Notes"));
+      assert.lengthOf(b.received.filter(r => r.fromSelf), 1);
+    });
+
+    it("keeps a member who lost the key from sharing changes, without retrying", async function() {
+      removeCarol();
+      // Carol, unaware, edits before the key is replaced: the server refuses it, as she no longer
+      // holds the key, and her browser gives up (and undoes it locally).
+      await assert.isRejected(c.doc.applyUserActions([["UpdateRecord", "Notes", 1, { Text: "carol was here" }]]),
+        /holding the document key/);
+      assert.deepEqual(relay.pushLog.filter(l => l.userId === carol.userId).map(l => l.outcome), ["denied"]);
+      assert.deepEqual((await tableValues(c, "Notes"))[3].Text, ["start"]);
+
+      // Once the key is replaced, her attempts (with the old key) are refused, and she can't
+      // follow nor make them again with the new key she doesn't have.
+      await a.doc.refreshKeys();
+      await a.doc.applyUserActions([["AddRecord", "Notes", null, { Text: "after" }]]);
+      const head = relay.head;
+      await assert.isRejected(c.doc.applyUserActions([["UpdateRecord", "Notes", 1, { Text: "again" }]]),
+        MissingKeyError);
+      // (Whether the server refused it or her browser couldn't even encrypt it, nothing got
+      // through, and she didn't keep trying.)
+      const outcomes = relay.pushLog.filter(l => l.userId === carol.userId).map(l => l.outcome);
+      assert.notInclude(outcomes, "accepted");
+      assert.isAtMost(outcomes.length, 2);
+      assert.equal(relay.head, head);
+      assert.deepEqual((await tableValues(c, "Notes"))[3].Text, ["start"]);
+      assert.notInclude(JSON.stringify(await readableWithDocKey(relay)), "carol was here");
+      await b.doc.sync();
+      assert.deepEqual((await tableValues(b, "Notes"))[3].Text, ["start", "after"]);
+    });
+  });
+
   describe("private columns", function() {
     let relay: MemoryRelay;
     let a: Participant;   // Owner: can read everything.
@@ -317,7 +546,7 @@ describe("encryption/LocalActiveDoc", function() {
     before(async function() {
       relay = await newRelay(bob, carol);
       a = await join(relay, alice, { create: true });
-      giveKeys(relay, DOC_SCOPE, bob, carol);
+      await giveKeys(relay, DOC_SCOPE, bob, carol);
       await a.doc.applyUserActions([
         ["AddTable", "Staff", [
           { id: "Name", type: "Text", isFormula: false },
@@ -522,8 +751,9 @@ describe("encryption/LocalActiveDoc", function() {
         Salary: [LOCKED_CELL, 63000], Total: [LOCKED_CELL, 64000],
       });
       assert.deepInclude((await tableValues(a, "Staff"))[3], { Salary: [55000, 63000], Total: [55800, 64000] });
-      // The server's copy of the document was re-encrypted with the new key.
-      assert.lengthOf(relay.snapshots, 1);
+      // The document was saved again with the new key (as of the key change).
+      const latest = relay.snapshots[relay.snapshots.length - 1];
+      assert.equal(latest.actionNum, relay.keys.find(k => k.keyId === newKey.keyId)!.actionNum);
     });
 
     it("replaces the document key when someone loses access to the document", async function() {
@@ -539,9 +769,11 @@ describe("encryption/LocalActiveDoc", function() {
       await b.doc.sync();
       assert.equal((await tableValues(b, "Staff"))[3].Name[1], "Benoît");
       await assert.isRejected(c.doc.sync(), MissingKeyError);
-      // Everything on the server uses the new key.
-      assert.isTrue([...relay.snapshots, ...relay.actions.filter(r => r.kind === "change")]
+      // Everything on the server since uses the new key, and the latest snapshot too.
+      const keyNum = relay.keys.find(k => k.keyId === newKeyId)!.actionNum;
+      assert.isTrue(relay.actions.filter(r => r.kind === "change" && r.actionNum > keyNum)
         .every(r => r.keyId === newKeyId));
+      assert.equal(relay.snapshots[relay.snapshots.length - 1].keyId, newKeyId);
     });
 
     it("encrypts attachments with keys of their own", async function() {
@@ -572,6 +804,234 @@ describe("encryption/LocalActiveDoc", function() {
       await b.doc.applyUserActions([["UpdateRecord", "Staff", 1, { Salary: 56000 }]]);
       await a.doc.sync();
       assert.deepInclude((await tableValues(a, "Staff"))[3], { Salary: [56000, 63000], Total: [56800, 64000] });
+    });
+  });
+  describe("what reveals private values", function() {
+    let relay: MemoryRelay;
+    let a: Participant;   // Owner: can read everything.
+    let b: Participant;   // Can read the private columns.
+    let c: Participant;   // Can't.
+    let scope: string;
+    let staffRef: number;
+    let salaryRef: number;
+
+    async function colRef(p: Participant, tableId: string, colId: string) {
+      const tables = await tableValues(p, "_grist_Tables");
+      const cols = await tableValues(p, "_grist_Tables_column");
+      const tableRef = tables[2][tables[3].tableId.indexOf(tableId)];
+      return cols[2].find((_, i) => cols[3].parentId[i] === tableRef && cols[3].colId[i] === colId)!;
+    }
+
+    async function syncAll() {
+      for (const p of [a, b, c]) { await p.doc.sync(); }
+    }
+
+    before(async function() {
+      relay = await newRelay(bob, carol);
+      a = await join(relay, alice, { create: true });
+      await giveKeys(relay, DOC_SCOPE, bob, carol);
+      await a.doc.applyUserActions([
+        ["AddTable", "Staff", [
+          { id: "Name", type: "Text", isFormula: false },
+          { id: "Salary", type: "Numeric", isFormula: false },
+          { id: "HighEarner", type: "Bool", isFormula: true, formula: "$Salary > 55000" },
+          { id: "Grade", type: "Choice", isFormula: false, widgetOptions: JSON.stringify({ choices: ["A"] }) },
+        ]],
+        ["BulkAddRecord", "Staff", [null, null], { Name: ["Ana", "Ben"], Salary: [52100, 61300] }],
+      ]);
+      staffRef = (await tableValues(a, "_grist_Tables"))[2][1];
+      salaryRef = await colRef(a, "Staff", "Salary");
+      scope = makeColumnScope();
+      await a.doc.createScopeKey(scope, [alice, bob].map(m => ({ ...m, vaultUserId: vaultIdFor(m) })), salaryRef);
+      const gradeScope = makeColumnScope();
+      await a.doc.createScopeKey(gradeScope, [alice, bob].map(m => ({ ...m, vaultUserId: vaultIdFor(m) })),
+        await colRef(a, "Staff", "Grade"));
+      await a.doc.saveSnapshot({ compact: true });
+      b = await join(relay, bob);
+      c = await join(relay, carol);
+    });
+
+    after(function() {
+      for (const p of [a, b, c]) { leave(relay, p); }
+    });
+
+    it("keeps private the summaries grouped by formulas using private columns", async function() {
+      const highEarnerRef = await colRef(a, "Staff", "HighEarner");
+      await a.doc.applyUserActions([["CreateViewSection", staffRef, 0, "record", [highEarnerRef], null]]);
+      await syncAll();
+      assert.deepEqual(a.doc.privacy.scopesOf("Staff_summary_HighEarner", "HighEarner"), [scope]);
+      assert.deepEqual((await tableValues(b, "Staff_summary_HighEarner"))[3].HighEarner, [false, true]);
+      assert.deepEqual((await tableValues(c, "Staff_summary_HighEarner"))[3].HighEarner, [LOCKED_CELL, LOCKED_CELL]);
+    });
+
+    it("seals saved filters, comments and choices of private columns", async function() {
+      const sectionRef = (await tableValues(a, "_grist_Views_section"))[2][0];
+      await a.doc.applyUserActions([
+        ["AddRecord", "_grist_Filters", null,
+          { viewSectionRef: sectionRef, colRef: salaryRef, filter: JSON.stringify({ included: [61300.5] }) }],
+        ["AddRecord", "_grist_Cells", null, {
+          tableRef: staffRef, colRef: salaryRef, rowId: 1, type: 1, root: true,
+          content: JSON.stringify({ text: "raise to 77777" }),
+        }],
+        ["UpdateRecord", "_grist_Tables_column", await colRef(a, "Staff", "Grade"),
+          { widgetOptions: JSON.stringify({ choices: ["A", "Fired-Secretly"] }) }],
+      ]);
+      await syncAll();
+      const readable = await readableWithDocKey(relay);
+      for (const secret of ["61300.5", "77777", "Fired-Secretly"]) { assert.notInclude(readable, secret); }
+      assert.include((await tableValues(b, "_grist_Filters"))[3].filter[0], "61300.5");
+      assert.include((await tableValues(b, "_grist_Cells"))[3].content[0], "77777");
+      assert.equal((await tableValues(c, "_grist_Filters"))[3].filter[0], LOCKED_CELL);
+      assert.equal((await tableValues(c, "_grist_Cells"))[3].content[0], LOCKED_CELL);
+      const cols = await tableValues(c, "_grist_Tables_column");
+      assert.equal(cols[3].widgetOptions[cols[2].indexOf(await colRef(c, "Staff", "Grade"))], LOCKED_CELL);
+      // Members without the key can't change them, nor drop them (undoing it would need them).
+      await assert.isRejected(c.doc.applyUserActions([["RemoveRecord", "_grist_Filters", 1]]), /private settings/);
+      await assert.isRejected(c.doc.applyUserActions([["UpdateRecord", "_grist_Filters", 1, { filter: "" }]]),
+        /private settings/);
+      // Their snapshots pass them on, sealed.
+      await c.doc.saveSnapshot();
+      assert.equal(relay.snapshots[relay.snapshots.length - 1].actionNum, relay.head);
+      const b2 = await join(relay, bob);
+      assert.include((await tableValues(b2, "_grist_Cells"))[3].content[0], "77777");
+      leave(relay, b2);
+      assert.notInclude(await readableWithDocKey(relay), "77777");
+    });
+
+    it("seals the names and sizes of files attached in private columns", async function() {
+      const encrypted = await encryptFile(a.doc.keyring, scope, new TextEncoder().encode("%PDF payslip"));
+      const { fileId } = await a.client.uploadFile(encrypted.ciphertext);
+      await a.doc.applyUserActions([["AddRecord", "_grist_Attachments", null, {
+        fileName: "payslip-of-ana.pdf", fileSize: 12345, fileIdent: makeFileIdent({ fileId, ...encrypted.ref }),
+      }]]);
+      await syncAll();
+      const readable = await readableWithDocKey(relay);
+      assert.notInclude(readable, "payslip-of-ana");
+      assert.notInclude(readable, "12345");
+      assert.equal((await tableValues(b, "_grist_Attachments"))[3].fileName[0], "payslip-of-ana.pdf");
+      assert.equal((await tableValues(c, "_grist_Attachments"))[3].fileName[0], LOCKED_CELL);
+    });
+
+    it("finds private columns used under names Python reads the same", async function() {
+      await a.doc.applyUserActions([
+        ["AddColumn", "Staff", "Wide", { type: "Any", isFormula: true, formula: "rec.\uFF33alary * 2" }],
+      ]);
+      assert.deepEqual(a.doc.privacy.scopesOf("Staff", "Wide"), [scope]);
+      await syncAll();
+      assert.deepEqual((await tableValues(c, "Staff"))[3].Wide, [LOCKED_CELL, LOCKED_CELL]);
+      assert.deepEqual((await tableValues(a, "Staff"))[3].Wide, [104200, 122600]);
+      await a.doc.applyUserActions([["RemoveColumn", "Staff", "Wide"]]);
+      await syncAll();
+    });
+
+    it("refuses changes to columns formulas members can't compute use", async function() {
+      await a.doc.applyUserActions([
+        ["AddColumn", "Staff", "Bonus", { type: "Numeric", isFormula: false }],
+        ["AddColumn", "Staff", "Total", { type: "Numeric", isFormula: true, formula: "$Salary + $Bonus" }],
+      ]);
+      await syncAll();
+      const head = relay.head;
+      await assert.isRejected(c.doc.applyUserActions([["RenameColumn", "Staff", "Bonus", "Extra"]]),
+        /used by a calculation/);
+      await assert.isRejected(c.doc.applyUserActions([["ModifyColumn", "Staff", "Bonus", { type: "Text" }]]),
+        /used by a calculation/);
+      await assert.isRejected(c.doc.applyUserActions([["RemoveColumn", "Staff", "Bonus"]]), /used by a calculation/);
+      assert.equal(relay.head, head);
+      assert.deepInclude((await tableValues(c, "Staff"))[3], { Bonus: [0, 0] });
+    });
+
+    it("doesn't give new columns the ids of removed private columns", async function() {
+      const tempScope = makeColumnScope();
+      await a.doc.applyUserActions([["AddColumn", "Staff", "Temp", { type: "Text", isFormula: false }]]);
+      const tempRef = await colRef(a, "Staff", "Temp");
+      await a.doc.createScopeKey(tempScope, [alice].map(m => ({ ...m, vaultUserId: vaultIdFor(m) })), tempRef);
+      await a.doc.applyUserActions([["RemoveColumn", "Staff", "Temp"]]);
+      await a.doc.applyUserActions([["AddColumn", "Staff", "Fresh", { type: "Text", isFormula: false }]]);
+      assert.isAbove(await colRef(a, "Staff", "Fresh"), tempRef);
+      assert.deepEqual(a.doc.privacy.scopesOf("Staff", "Fresh"), []);
+      await syncAll();
+      await c.doc.applyUserActions([["UpdateRecord", "Staff", 1, { Fresh: "anyone can write here" }]]);
+    });
+
+    it("never takes the locked placeholder for a value of regular documents", function() {
+      assert.isFalse(isLockedCell("locked"));
+      assert.isTrue(isLockedCell(LOCKED_CELL));
+    });
+  });
+
+  describe("making a column public again", function() {
+    let relay: MemoryRelay;
+    let a: Participant;   // Owner holding the column's key.
+    let c: Participant;   // Member who can't read it.
+    let scope: string;
+    let fileRef: EncryptedFileRef;
+
+    before(async function() {
+      relay = await newRelay(carol);
+      a = await join(relay, alice, { create: true });
+      await giveKeys(relay, DOC_SCOPE, carol);
+      await a.doc.applyUserActions([
+        ["AddTable", "Staff", [
+          { id: "Name", type: "Text", isFormula: false },
+          { id: "Salary", type: "Numeric", isFormula: false },
+          { id: "Double", type: "Numeric", isFormula: true, formula: "$Salary * 2" },
+        ]],
+        ["BulkAddRecord", "Staff", [null, null], { Name: ["Ana", "Ben"], Salary: [52100, 61300] }],
+      ]);
+      const cols = await tableValues(a, "_grist_Tables_column");
+      const salaryRef = cols[2][cols[3].colId.indexOf("Salary")];
+      scope = makeColumnScope();
+      await a.doc.createScopeKey(scope, [{ ...alice, vaultUserId: vaultIdFor(alice) }], salaryRef);
+      await a.doc.saveSnapshot({ compact: true });
+      const encrypted = await encryptFile(a.doc.keyring, scope, new TextEncoder().encode("%PDF payslip"));
+      const { fileId } = await a.client.uploadFile(encrypted.ciphertext);
+      fileRef = { fileId, ...encrypted.ref };
+      await a.doc.applyUserActions([["AddRecord", "_grist_Attachments", null, {
+        fileName: "payslip.pdf", fileSize: 12, fileIdent: makeFileIdent(fileRef),
+      }]]);
+      c = await join(relay, carol);
+    });
+
+    after(function() {
+      for (const p of [a, c]) { leave(relay, p); }
+    });
+
+    it("waits for the values to be shared before saving snapshots", async function() {
+      // The column is made public, but sharing its values fails (e.g. the owner went offline).
+      const realPush = a.client.pushAction.bind(a.client);
+      a.client.pushAction = async () => { throw new Error("offline"); };
+      try {
+        await a.doc.releaseScope(scope);
+      } finally {
+        a.client.pushAction = realPush;
+      }
+      await c.doc.sync();
+      assert.deepEqual(c.doc.privacy.scopesOf("Staff", "Salary"), []);
+      assert.deepInclude((await tableValues(c, "Staff"))[3], { Salary: [LOCKED_CELL, LOCKED_CELL] });
+      // Carol's snapshot would save her locked values as the column's: she leaves it for later.
+      const snapshots = relay.snapshots.length;
+      await c.doc.saveSnapshot();
+      assert.lengthOf(relay.snapshots, snapshots);
+    });
+
+    it("shares the values as soon as a member who can read them can", async function() {
+      await a.doc.refreshKeys();
+      await a.doc.sync();   // (Waits for the sharing, done in the background.)
+      await c.doc.sync();
+      assert.deepInclude((await tableValues(c, "Staff"))[3], { Salary: [52100, 61300], Double: [104200, 122600] });
+      // Attachments of the column get keys everyone can use.
+      const attachments = await tableValues(c, "_grist_Attachments");
+      assert.equal(attachments[3].fileName[0], "payslip.pdf");
+      const newRef = parseFileIdent(attachments[3].fileIdent[0] as string)!;
+      assert.notEqual(newRef.keyId, fileRef.keyId);
+      const data = await decryptFile(c.doc.keyring, newRef, await c.client.fetchFile(newRef.fileId));
+      assert.equal(new TextDecoder().decode(data), "%PDF payslip");
+      // Now snapshots can be saved, with the values.
+      await c.doc.saveSnapshot();
+      assert.equal(relay.snapshots[relay.snapshots.length - 1].actionNum, relay.head);
+      const c2 = await join(relay, carol);
+      assert.deepInclude((await tableValues(c2, "Staff"))[3], { Salary: [52100, 61300] });
+      leave(relay, c2);
     });
   });
 });

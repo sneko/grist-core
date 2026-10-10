@@ -193,6 +193,8 @@ class TestFormulaLockdown(unittest.TestCase):
       'F': 'vars(rec)',
       'G': '(x for x in [1]).gi_frame',
       'H': 'rec.__class__',
+      'K': 'class K:\n  def __getattr__(self, n): return n\nreturn K().x',
+      'L': 'f = lambda __x: __x\nreturn f(1)',
     }
     for col_id, formula in formulas.items():
       add_formula(eng, col_id, formula)
@@ -254,6 +256,41 @@ class TestFormulaLockdown(unittest.TestCase):
           continue
         queue.append((value, path + '.' + name))
     self.assertEqual(found, [])
+
+
+class TestExportXlsx(unittest.TestCase):
+  def test_export_xlsx(self):
+    import base64, io  # pylint: disable=import-outside-toplevel,multiple-imports
+    import openpyxl  # pylint: disable=import-outside-toplevel
+    eng = new_doc()
+    data = eng.call('export_xlsx', [
+      ['Staff', ['Name', 'Salary', 'Active'], [['Ana', 52100.5, True], ['=1+1', None, False]]],
+      ['Staff', ['A'], [['x']]],
+    ])
+    workbook = openpyxl.load_workbook(io.BytesIO(base64.b64decode(data)))
+    self.assertEqual(workbook.sheetnames, ['Staff', 'Staff (2)'])
+    rows = [[c.value for c in row] for row in workbook['Staff'].iter_rows()]
+    self.assertEqual(rows, [['Name', 'Salary', 'Active'], ['Ana', 52100.5, True], ['=1+1', None, False]])
+    # Text that looks like a formula stays text.
+    self.assertEqual(workbook['Staff']['A3'].data_type, 's')
+
+
+class TestReservedRowIds(unittest.TestCase):
+  def test_removed_private_column_ids_are_not_reused(self):
+    eng = staff_doc()
+    columns = lambda: eng.call('fetch_table', '_grist_Tables_column')
+    salary_ref = columns()[2][columns()[3]['colId'].index('Salary')]
+    # The browser says Salary's id must not be reused (it's a private column's).
+    eng.call('set_reserved_row_ids', '_grist_Tables_column', [salary_ref])
+    removal = eng.call('apply_user_actions', [['RemoveColumn', 'Staff', 'Salary']])
+    addition = eng.call('apply_user_actions', [['AddColumn', 'Staff', 'Other', {'type': 'Text'}]])
+    other_ref = columns()[2][columns()[3]['colId'].index('Other')]
+    self.assertGreater(other_ref, salary_ref)
+    # Undoing the removal restores the column with its id.
+    undo = lambda result: eng.call('apply_user_actions', [['ApplyUndoActions', [a for (_e, a) in result['undo']]]])
+    undo(addition)
+    undo(removal)
+    self.assertEqual(columns()[2][columns()[3]['colId'].index('Salary')], salary_ref)
 
 
 class TestScopeMonitor(unittest.TestCase):
