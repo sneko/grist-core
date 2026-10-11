@@ -2,13 +2,16 @@
  * Tests the server side of encrypted documents: the doc option, the relay of encrypted changes
  * between browsers, their storage in the document's file, and the management of keys.
  */
+import { marshalValue, unmarshalValue } from "app/common/encryption/EncryptedPayloads";
+import { gunzip, gzip } from "app/common/encryption/EncryptionCrypto";
 import {
   DOC_SCOPE, DocKeyRecord, ENCRYPTED_DOC_SERVER_ERROR, ENCRYPTED_PART_BYTES, EncryptedDocOpenResult,
   EncryptionKeysResult, EncryptionMember,
 } from "app/common/encryption/EncryptionTypes";
 import { UserAPI } from "app/common/UserAPI";
-import { DocEncryptionKeyWrap } from "app/gen-server/entity/DocEncryption";
+import { DocEncryptionKey, DocEncryptionKeyWrap } from "app/gen-server/entity/DocEncryption";
 import { getEncryptionClientConfig } from "app/server/lib/encryption/encryptionConfig";
+import { Deps as RelayDeps } from "app/server/lib/encryption/EncryptionRelay";
 import { SQLiteDB } from "app/server/lib/SQLiteDB";
 import { TestServer } from "test/gen-server/apiUtils";
 import { GristClient, openClient } from "test/server/gristClient";
@@ -125,6 +128,25 @@ describe("encryption/EncryptionRelay", function() {
       assert.deepEqual(getEncryptionClientConfig(), { mockVault: true });
       process.env.NODE_ENV = "production";
       assert.throws(() => getEncryptionClientConfig(), /no security, and can't be used in production/);
+    });
+
+    it("reads the AI service browsers may call for encrypted documents", function() {
+      process.env.GRIST_ENCRYPTION_FEATURE_ENABLED = "true";
+      process.env.GRIST_ENCRYPTION_MOCK_VAULT = "true";
+      process.env.NODE_ENV = "development";
+      const assistant = { endpoint: "https://ai.example.com/v1/chat/completions", model: "m", provider: "Example",
+        sovereign: true, auth: "user-key" as const };
+      process.env.GRIST_ENCRYPTION_ASSISTANT = JSON.stringify(assistant);
+      assert.deepEqual(getEncryptionClientConfig()?.assistant, assistant);
+      for (const [value, error] of [
+        ["{", /invalid JSON/],
+        [JSON.stringify({ ...assistant, endpoint: "http://ai.example.com/" }), /https URL/],
+        [JSON.stringify({ ...assistant, sovereign: "yes" }), /sovereign/],
+        [JSON.stringify({ ...assistant, auth: "server-key" }), /auth must be/],
+      ] as const) {
+        process.env.GRIST_ENCRYPTION_ASSISTANT = value;
+        assert.throws(() => getEncryptionClientConfig(), error);
+      }
     });
 
     it("refuses encrypted documents when they're not enabled", async function() {
@@ -477,25 +499,49 @@ describe("encryption/EncryptionRelay", function() {
       await call(alice, "uploadEncryptedFile", docId, Buffer.alloc(2e6).toString("base64"));
     });
 
-    it("never takes away the last copies of a key", async function() {
-      // A document whose key only Bob holds.
-      const soleDocId = await owner.newDoc({ name: "sole", options: { encryption: { version: 1 } } }, wsId);
-      const alice = await connect("chimpy@getgrist.com");
-      await call(alice, "openEncryptedDoc", soleDocId);
-      await call(alice, "createEncryptionKey", soleDocId,
-        { scope: DOC_SCOPE, keyId: "doc~sole", baseActionNum: 0, wraps: [wrap(ids["chimpy@getgrist.com"])] });
-      await call(alice, "shareEncryptionKeys", soleDocId, [wrap(ids["charon@getgrist.com"], "doc~sole")]);
-      await call(alice, "revokeEncryptionKeys", soleDocId, [ids["chimpy@getgrist.com"]]);
-      // Bob loses access (e.g. by mistake): his copy stays, so that it can be given back.
-      await owner.updateWorkspacePermissions(wsId, { users: { "charon@getgrist.com": null } });
-      home.dbManager.flushDocAuthCache();
-      await call(alice, "listEncryptionMembers", soleDocId);
-      const wraps = await home.dbManager.connection.manager.find(DocEncryptionKeyWrap, { where: { docId: soleDocId } });
-      assert.deepEqual(wraps.map(w => w.userId), [ids["charon@getgrist.com"]]);
-      await owner.updateWorkspacePermissions(wsId, { users: { "charon@getgrist.com": "editors" } });
-      home.dbManager.flushDocAuthCache();
-      const bob = await connect("charon@getgrist.com");
-      assert.deepEqual((await call(bob, "getEncryptionKeys", soleDocId)).myKeys.map((k: any) => k.keyId), ["doc~sole"]);
+    describe("documents whose key only one member holds", function() {
+      let soleDocId: string;
+
+      before(async function() {
+        // A document whose key only Bob holds (Alice gave it to him, and gave hers up).
+        soleDocId = await owner.newDoc({ name: "sole", options: { encryption: { version: 1 } } }, wsId);
+        const alice = await connect("chimpy@getgrist.com");
+        await call(alice, "openEncryptedDoc", soleDocId);
+        await call(alice, "createEncryptionKey", soleDocId,
+          { scope: DOC_SCOPE, keyId: "doc~sole", baseActionNum: 0, wraps: [wrap(ids["chimpy@getgrist.com"])] });
+        await call(alice, "shareEncryptionKeys", soleDocId, [wrap(ids["charon@getgrist.com"], "doc~sole")]);
+        await call(alice, "revokeEncryptionKeys", soleDocId, [ids["chimpy@getgrist.com"]]);
+      });
+
+      after(async function() {
+        await owner.deleteDoc(soleDocId);
+      });
+
+      it("refuses changes leaving nobody holding its key with access to it", async function() {
+        const unreadable = /nobody able to read the encrypted document "sole"/;
+        // Removing Bob from the workspace, or the site, or moving the document where he can't go.
+        await assert.isRejected(owner.updateWorkspacePermissions(wsId, { users: { "charon@getgrist.com": null } }),
+          unreadable);
+        await assert.isRejected(owner.updateOrgPermissions(ORG, { users: { "charon@getgrist.com": null } }),
+          unreadable);
+        const otherWsId = await owner.newWorkspace({ name: "elsewhere" }, "current");
+        try {
+          await assert.isRejected(owner.moveDoc(soleDocId, otherWsId), unreadable);
+          // Not inheriting access from the workspace either.
+          await assert.isRejected(owner.updateDocPermissions(soleDocId, { maxInheritedRole: null }), unreadable);
+          // Nothing changed.
+          assert.equal((await owner.getDoc(soleDocId)).workspace.id, wsId);
+          // Once Bob has access to the document of its own, it's all fine.
+          await owner.updateDocPermissions(soleDocId, { users: { "charon@getgrist.com": "editors" } });
+          await owner.moveDoc(soleDocId, otherWsId);
+          await owner.moveDoc(soleDocId, wsId);
+        } finally {
+          await owner.deleteWorkspace(otherWsId);
+        }
+        // Other documents aren't concerned.
+        await owner.updateWorkspacePermissions(wsId, { users: { "kiwi@getgrist.com": "editors" } });
+        await owner.updateWorkspacePermissions(wsId, { users: { "kiwi@getgrist.com": "viewers" } });
+      });
     });
 
     it("stops forwarding changes to members who lost access", async function() {
@@ -512,4 +558,457 @@ describe("encryption/EncryptionRelay", function() {
       home.dbManager.flushDocAuthCache();
     });
   });
+
+  describe("sensitive changes", function() {
+    let sensitiveDocId: string;
+
+    // A new encrypted document, set up by Alice, with Bob holding its key too.
+    async function setUp(name: string) {
+      const newDocId = await owner.newDoc({ name, options: { encryption: { version: 1 } } }, wsId);
+      const alice = await connect("chimpy@getgrist.com");
+      await call(alice, "openEncryptedDoc", newDocId);
+      await call(alice, "createEncryptionKey", newDocId,
+        { scope: DOC_SCOPE, keyId: "doc~k1", baseActionNum: 0, wraps: [wrap(ids["chimpy@getgrist.com"])] });
+      await call(alice, "saveEncryptedSnapshot", newDocId, 0, "doc~k1", b64("state0"));
+      await call(alice, "shareEncryptionKeys", newDocId, [wrap(ids["charon@getgrist.com"], "doc~k1")]);
+      await call(alice, "pushEncryptedAction", newDocId, 0, "doc~k1", b64("c1"));
+      return { alice, newDocId };
+    }
+
+    before(async function() {
+      sensitiveDocId = (await setUp("sensitive")).newDocId;
+    });
+
+    it("saves snapshots along with key changes, together or not at all", async function() {
+      const alice = await connect("chimpy@getgrist.com");
+      const bob = await connect("charon@getgrist.com");
+      await call(alice, "openEncryptedDoc", sensitiveDocId);
+      const wraps = [wrap(ids["chimpy@getgrist.com"])];
+      // Only owners drop the history, even along with a key change.
+      await assert.isRejected(call(bob, "createEncryptionKey", sensitiveDocId, {
+        scope: DOC_SCOPE, keyId: "doc~k2", baseActionNum: 1, wraps: [wrap(ids["charon@getgrist.com"])],
+        snapshot: b64("state2"), compact: true,
+      }), /Only owners can drop the history/);
+      // Making a column private, with the snapshot that drops what was readable before.
+      const request = {
+        scope: "column:salary", keyId: "column:salary~1", baseActionNum: 1, wraps, colRef: 3,
+        snapshot: b64("state2-private"), compact: true,
+      };
+      // Refused as a whole when not on top of the latest change.
+      assert.deepEqual(await call(alice, "createEncryptionKey", sensitiveDocId, { ...request, baseActionNum: 0 }),
+        { accepted: false, head: 1 });
+      assert.deepEqual((await call(alice, "getEncryptionKeys", sensitiveDocId)).bindings, []);
+      assert.deepInclude(await call(alice, "createEncryptionKey", sensitiveDocId, request),
+        { accepted: true, actionNum: 2 });
+      const opened: EncryptedDocOpenResult = await call(bob, "openEncryptedDoc", sensitiveDocId);
+      assert.deepInclude(opened.snapshot, { actionNum: 2, keyId: "doc~k1", payload: b64("state2-private") });
+      assert.deepEqual(opened.actions, []);
+      assert.deepEqual(opened.bindings, [{ scope: "column:salary", colRef: 3, boundAt: 2, releasedAt: null }]);
+      // A new document key's snapshot is encrypted with it.
+      assert.deepInclude(await call(bob, "createEncryptionKey", sensitiveDocId, {
+        scope: DOC_SCOPE, keyId: "doc~k2", baseActionNum: 2,
+        wraps: [wrap(ids["charon@getgrist.com"]), wrap(ids["chimpy@getgrist.com"])], snapshot: b64("state3"),
+      }), { accepted: true, actionNum: 3 });
+      assert.deepInclude((await call(alice, "openEncryptedDoc", sensitiveDocId)).snapshot,
+        { actionNum: 3, keyId: "doc~k2", payload: b64("state3") });
+    });
+
+    it("undoes key changes that didn't make it into the history", async function() {
+      const alice = await connect("chimpy@getgrist.com");
+      // As if saving the entry failed after the home database recorded the key.
+      const keys = home.dbManager.connection.manager.getRepository(DocEncryptionKey);
+      await keys.update({ docId: sensitiveDocId, keyId: "doc~k2" }, { retiredAt: new Date() });
+      await keys.insert({ docId: sensitiveDocId, keyId: "doc~lost", scope: DOC_SCOPE, createdBy: null,
+        rotateOnNextEdit: false, retiredAt: null, createdAt: new Date(), actionNum: 4 });
+      const opened: EncryptedDocOpenResult = await call(alice, "openEncryptedDoc", sensitiveDocId);
+      assert.equal(opened.head, 3);
+      assert.deepEqual(opened.keys.filter(k => k.current).map(k => k.keyId).sort(), ["column:salary~1", "doc~k2"]);
+      assert.notInclude(opened.keys.map(k => k.keyId), "doc~lost");
+    });
+
+    it("lets owners restore earlier versions, recorded in the history", async function() {
+      const alice = await connect("chimpy@getgrist.com");
+      const bob = await connect("charon@getgrist.com");
+      await call(alice, "openEncryptedDoc", sensitiveDocId);
+      await call(bob, "openEncryptedDoc", sensitiveDocId);
+      await call(alice, "pushEncryptedAction", sensitiveDocId, 3, "doc~k2", b64("c4"));
+      assert.deepInclude((await nextMessage(bob, "encryptedDocAction"))?.data.action, { actionNum: 4 });
+      const snapshots = await call(bob, "listEncryptedSnapshots", sensitiveDocId);
+      assert.deepEqual(snapshots.map((s: any) => [s.actionNum, s.keyId, s.userId]),
+        [[3, "doc~k2", ids["charon@getgrist.com"]], [2, "doc~k1", ids["chimpy@getgrist.com"]]]);
+      assert.deepInclude(await call(bob, "getEncryptedSnapshot", sensitiveDocId, 3), { payload: b64("state3") });
+      // Only owners, with the current key, on top of the latest change.
+      await assert.isRejected(call(bob, "restoreEncryptedSnapshot", sensitiveDocId, 4, "doc~k2", b64("old")),
+        /access/i);
+      await assert.isRejected(call(alice, "restoreEncryptedSnapshot", sensitiveDocId, 4, "doc~k1", b64("old")),
+        /current document key/);
+      assert.deepEqual(await call(alice, "restoreEncryptedSnapshot", sensitiveDocId, 3, "doc~k2", b64("old")),
+        { accepted: false, head: 4 });
+      assert.deepInclude(await call(alice, "restoreEncryptedSnapshot", sensitiveDocId, 4, "doc~k2", b64("old")),
+        { accepted: true, actionNum: 5 });
+      assert.deepInclude((await nextMessage(bob, "encryptedDocAction"))?.data.action,
+        { actionNum: 5, kind: "restore", keyId: "doc~k2" });
+      const opened: EncryptedDocOpenResult = await call(bob, "openEncryptedDoc", sensitiveDocId);
+      assert.deepInclude(opened.snapshot, { actionNum: 5, payload: b64("old") });
+      // The previous version is still there (as an earlier one).
+      assert.deepEqual((await call(bob, "listEncryptedSnapshots", sensitiveDocId)).map((s: any) => s.actionNum),
+        [5, 3, 2]);
+    });
+
+    it("lets owners lock documents for a while", async function() {
+      const alice = await connect("chimpy@getgrist.com");
+      const bob = await connect("charon@getgrist.com");
+      await call(alice, "openEncryptedDoc", sensitiveDocId);
+      await call(bob, "openEncryptedDoc", sensitiveDocId);
+      await assert.isRejected(call(bob, "lockEncryptedDoc", sensitiveDocId, "restoring"), /access/i);
+      await call(alice, "lockEncryptedDoc", sensitiveDocId, "restoring");
+      assert.deepEqual((await nextMessage(bob, "encryptedDocLock"))?.data,
+        { docId: sensitiveDocId, lock: { reason: "restoring", userName: "Chimpy" } });
+      assert.deepEqual(await call(bob, "getDocLock", sensitiveDocId), { reason: "restoring", userName: "Chimpy" });
+      // Others can't change it meanwhile; its owner can.
+      await assert.isRejected(call(bob, "pushEncryptedAction", sensitiveDocId, 5, "doc~k2", b64("c6")),
+        /being changed by another member/);
+      await assert.isRejected(call(alice, "lockEncryptedDoc", sensitiveDocId, "restoring"), /being changed/);
+      assert.deepInclude(await call(alice, "pushEncryptedAction", sensitiveDocId, 5, "doc~k2", b64("c6")),
+        { accepted: true });
+      // Released when its owner is done, or gone.
+      await call(alice, "unlockEncryptedDoc", sensitiveDocId);
+      assert.deepEqual((await nextMessage(bob, "encryptedDocLock"))?.data, { docId: sensitiveDocId, lock: null });
+      const lockExpiryMs = RelayDeps.lockExpiryMs;
+      RelayDeps.lockExpiryMs = 300;
+      try {
+        await call(alice, "lockEncryptedDoc", sensitiveDocId, "restoring");
+        assert.deepEqual((await nextMessage(bob, "encryptedDocLock"))?.data.lock,
+          { reason: "restoring", userName: "Chimpy" });
+        // Kept as long as its owner renews it.
+        await new Promise(r => setTimeout(r, 200));
+        await call(alice, "renewDocLock", sensitiveDocId);
+        await new Promise(r => setTimeout(r, 200));
+        assert.isNotNull(await call(bob, "getDocLock", sensitiveDocId));
+        await alice.close();
+        assert.deepEqual((await nextMessage(bob, "encryptedDocLock"))?.data, { docId: sensitiveDocId, lock: null });
+      } finally {
+        RelayDeps.lockExpiryMs = lockExpiryMs;
+      }
+      assert.isNull(await call(bob, "getDocLock", sensitiveDocId));
+      assert.deepInclude(await call(bob, "pushEncryptedAction", sensitiveDocId, 6, "doc~k2", b64("c7")),
+        { accepted: true });
+    });
+  });
+
+  describe("new documents set up at once", function() {
+    it("sets up keys, private columns and the first snapshot together", async function() {
+      const newDocId = await owner.newDoc({ name: "copy", options: { encryption: { version: 1 } } }, wsId);
+      const alice = await connect("chimpy@getgrist.com");
+      const bob = await connect("charon@getgrist.com");
+      const init = {
+        docKey: { keyId: "doc~c", wraps: [wrap(ids["chimpy@getgrist.com"]), wrap(ids["charon@getgrist.com"])] },
+        columnKeys: [{ scope: "column:s", keyId: "column:s~1", colRef: 3, wraps: [wrap(ids["chimpy@getgrist.com"])] }],
+        snapshot: b64("first"),
+      };
+      await assert.isRejected(call(bob, "initializeEncryptedDoc", newDocId, init), /access/i);
+      await assert.isRejected(call(alice, "initializeEncryptedDoc", newDocId,
+        { ...init, columnKeys: [{ ...init.columnKeys[0], colRef: 0 }] }), /Invalid key/);
+      await assert.isRejected(call(alice, "initializeEncryptedDoc", newDocId,
+        { ...init, docKey: { keyId: "doc~c",
+          wraps: [wrap(ids["outsider@getgrist.com"]), wrap(ids["chimpy@getgrist.com"])] } }),
+      /only be given to members/);
+      // Nothing was kept of refused attempts.
+      assert.deepEqual((await call(alice, "openEncryptedDoc", newDocId)).keys, []);
+      await call(alice, "initializeEncryptedDoc", newDocId, init);
+      const opened: EncryptedDocOpenResult = await call(bob, "openEncryptedDoc", newDocId);
+      assert.deepInclude(opened.snapshot, { actionNum: 0, keyId: "doc~c", payload: b64("first") });
+      assert.deepEqual(opened.bindings, [{ scope: "column:s", colRef: 3, boundAt: 0, releasedAt: null }]);
+      assert.deepEqual(opened.myKeys.map(k => k.keyId), ["doc~c"]);
+      await assert.isRejected(call(alice, "initializeEncryptedDoc", newDocId, init), /already initialized/);
+      await owner.deleteDoc(newDocId);
+    });
+  });
+
+  describe("suggestions", function() {
+    it("keeps suggestions until members who can edit handle them", async function() {
+      const suggestDocId = await owner.newDoc({ name: "suggest", options: { encryption: { version: 1 } } }, wsId);
+      const alice = await connect("chimpy@getgrist.com");
+      const kiwi = await connect("kiwi@getgrist.com");
+      await call(alice, "openEncryptedDoc", suggestDocId);
+      await call(alice, "createEncryptionKey", suggestDocId,
+        { scope: DOC_SCOPE, keyId: "doc~s", baseActionNum: 0, wraps: [wrap(ids["chimpy@getgrist.com"])] });
+      await call(alice, "saveEncryptedSnapshot", suggestDocId, 0, "doc~s", b64("state0"));
+      await call(alice, "shareEncryptionKeys", suggestDocId, [wrap(ids["kiwi@getgrist.com"], "doc~s")]);
+      await call(kiwi, "openEncryptedDoc", suggestDocId);
+      // Viewers suggest only to documents that accept suggestions.
+      await assert.isRejected(call(kiwi, "submitEncryptedSuggestion", suggestDocId, "doc~s", b64("s1")),
+        /doesn't accept suggestions/);
+      await owner.updateDoc(suggestDocId, { options: { proposedChanges: { acceptProposals: true } } });
+      home.dbManager.flushDocAuthCache();
+      await call(kiwi, "openEncryptedDoc", suggestDocId);
+      await assert.isRejected(call(kiwi, "submitEncryptedSuggestion", suggestDocId, "doc~old", b64("s1")),
+        /current document key/);
+      const id = await call(kiwi, "submitEncryptedSuggestion", suggestDocId, "doc~s", b64("s1"));
+      assert.equal((await nextMessage(alice, "encryptedDocSuggestions"))?.data.docId, suggestDocId);
+      await call(alice, "submitEncryptedSuggestion", suggestDocId, "doc~s", b64("s2"));
+      // Viewers see theirs; members who can edit see all.
+      assert.deepEqual((await call(kiwi, "listEncryptedSuggestions", suggestDocId)).map((x: any) => x.payload),
+        [b64("s1")]);
+      const all = await call(alice, "listEncryptedSuggestions", suggestDocId);
+      assert.deepEqual(all.map((x: any) => [x.payload, x.userId]),
+        [[b64("s1"), ids["kiwi@getgrist.com"]], [b64("s2"), ids["chimpy@getgrist.com"]]]);
+      // Viewers can only withdraw their own.
+      await assert.isRejected(call(kiwi, "resolveEncryptedSuggestion", suggestDocId, all[1].id), /handle suggestions/);
+      await call(kiwi, "resolveEncryptedSuggestion", suggestDocId, id);
+      await call(alice, "resolveEncryptedSuggestion", suggestDocId, all[1].id);
+      assert.deepEqual(await call(alice, "listEncryptedSuggestions", suggestDocId), []);
+      await owner.deleteDoc(suggestDocId);
+    });
+  });
+
+  describe("forms", function() {
+    it("serves published forms to anyone, and keeps their answers until added", async function() {
+      const formDocId = await owner.newDoc({ name: "forms", options: { encryption: { version: 1 } } }, wsId);
+      const alice = await connect("chimpy@getgrist.com");
+      const kiwi = await connect("kiwi@getgrist.com");
+      await call(alice, "openEncryptedDoc", formDocId);
+      await call(alice, "createEncryptionKey", formDocId,
+        { scope: DOC_SCOPE, keyId: "doc~f", baseActionNum: 0, wraps: [wrap(ids["chimpy@getgrist.com"])] });
+      await call(alice, "saveEncryptedSnapshot", formDocId, 0, "doc~f", b64("state0"));
+      await call(kiwi, "openEncryptedDoc", formDocId);
+      const formId = "a".repeat(32);
+      const url = `${home.serverUrl}/o/${ORG}/api/docs/${formDocId}/encrypted-forms/${formId}`;
+      // Not published yet.
+      assert.equal((await fetch(url)).status, 404);
+      // Only members who can edit publish forms.
+      await assert.isRejected(call(kiwi, "publishEncryptedForm", formDocId, formId, b64("spec")), /access/i);
+      await call(alice, "publishEncryptedForm", formDocId, formId, b64("spec"));
+      // Anyone gets it (it's encrypted with the key in the form's link).
+      const got = await fetch(url);
+      assert.deepEqual(await got.json(), { spec: b64("spec") });
+      // Anyone sends answers (encrypted for the document's members).
+      const post = (payload: string) => fetch(url, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ payload }),
+      });
+      assert.equal((await post(b64("answer1"))).status, 200);
+      assert.equal((await nextMessage(alice, "encryptedDocInbox"))?.data.docId, formDocId);
+      assert.equal((await post(b64("answer2"))).status, 200);
+      assert.equal((await post("not base64!")).status, 400);
+      // Members who can edit see the answers waiting; others don't.
+      await assert.isRejected(call(kiwi, "listEncryptedInbox", formDocId), /access/i);
+      const inbox = await call(alice, "listEncryptedInbox", formDocId);
+      assert.deepEqual(inbox.map((e: any) => [e.formId, e.payload]),
+        [[formId, b64("answer1")], [formId, b64("answer2")]]);
+      // They leave the inbox along with the change adding them, or the change is refused.
+      assert.deepEqual(await call(alice, "pushEncryptedAction", formDocId, 0, "doc~f", b64("c1"),
+        { consumeInbox: [inbox[0].id, 999] }), { accepted: false, head: 0 });
+      assert.lengthOf(await call(alice, "listEncryptedInbox", formDocId), 2);
+      assert.deepInclude(await call(alice, "pushEncryptedAction", formDocId, 0, "doc~f", b64("c1"),
+        { consumeInbox: [inbox[0].id] }), { accepted: true, actionNum: 1 });
+      await call(alice, "dropEncryptedInbox", formDocId, [inbox[1].id]);
+      // Files attached in answers are sent first, then tied to their answer, and go with it.
+      const fileResp = await fetch(`${url}/files`, { method: "POST", body: Buffer.from("encrypted file"),
+        headers: { "X-Requested-With": "XMLHttpRequest" } });
+      const { fileId } = await fileResp.json();
+      assert.match(fileId, /^[0-9a-f]{32}$/);
+      // (Not readable until its answer is sent.)
+      await assert.isRejected(call(alice, "fetchEncryptedInboxFile", formDocId, fileId, 0, 100), /not found/);
+      assert.equal((await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload: b64("answer4"), fileIds: ["0".repeat(32)] }) })).status, 400);
+      assert.equal((await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload: b64("answer4"), fileIds: [fileId] }) })).status, 200);
+      await assert.isRejected(call(kiwi, "fetchEncryptedInboxFile", formDocId, fileId, 0, 100), /access/i);
+      assert.deepEqual(await call(alice, "fetchEncryptedInboxFile", formDocId, fileId, 0, 100),
+        { payload: b64("encrypted file"), size: 14 });
+      const [entry] = await call(alice, "listEncryptedInbox", formDocId);
+      await call(alice, "dropEncryptedInbox", formDocId, [entry.id]);
+      await assert.isRejected(call(alice, "fetchEncryptedInboxFile", formDocId, fileId, 0, 100), /not found/);
+      assert.deepEqual(await call(alice, "listEncryptedInbox", formDocId), []);
+      // Unpublished forms aren't served anymore.
+      await call(alice, "unpublishEncryptedForm", formDocId, formId);
+      assert.equal((await fetch(url)).status, 404);
+      assert.equal((await post(b64("answer3"))).status, 404);
+      // Regular documents have no such forms.
+      assert.equal((await fetch(`${home.serverUrl}/o/${ORG}/api/docs/${plainDocId}/encrypted-forms/${formId}`)).status,
+        404);
+      await owner.deleteDoc(formDocId);
+    });
+  });
+
+  describe("conversion", function() {
+    let regularDocId: string;
+    let tables: any;
+
+    before(async function() {
+      regularDocId = await owner.newDoc({ name: "to encrypt" }, wsId);
+      const docApi = owner.getDocAPI(regularDocId);
+      await docApi.addRows("Table1", { A: ["secret one", "secret two"] });
+      await docApi.uploadAttachment(new Blob(["attached content"]), "notes.txt");
+    });
+
+    it("encrypts regular documents", async function() {
+      const alice = await connect("chimpy@getgrist.com");
+      let bob = await connect("charon@getgrist.com");
+      assert.isUndefined((await bob.send("openDoc", regularDocId)).error);
+      await assert.isRejected(call(bob, "beginDocEncryption", regularDocId), /access/i);
+
+      const start = await call(alice, "beginDocEncryption", regularDocId);
+      assert.deepEqual(start.attachments.map((a: any) => a.size), [16]);
+      assert.sameMembers(start.members.map((m: any) => m.email),
+        ["chimpy@getgrist.com", "charon@getgrist.com", "kiwi@getgrist.com"]);
+      // Members who had it open got disconnected from it (their browser reconnects), and can't open
+      // it meanwhile.
+      assert.isNotNull(await nextMessage(bob, "docShutdown"));
+      bob = await connect("charon@getgrist.com");
+      const locked = await bob.send("openDoc", regularDocId);
+      assert.match(locked.error!, /being changed by another member/);
+      assert.deepEqual(locked.details?.docLock, { reason: "encrypting", userName: "Chimpy" });
+      await assert.isRejected(owner.getDocAPI(regularDocId).getRows("Table1"), /being changed/);
+      assert.deepEqual(await call(bob, "getDocLock", regularDocId), { reason: "encrypting", userName: "Chimpy" });
+      // Only the member encrypting it gets its content.
+      await assert.isRejected(call(bob, "fetchConversionData", regularDocId, 0, 10), /isn't being encrypted/);
+      const data = Buffer.from(await call(alice, "fetchConversionData", regularDocId, 0, start.size), "base64");
+      tables = unmarshalValue(await gunzip(data)).tables;
+      assert.deepEqual(tables.Table1[3].A, ["secret one", "secret two"]);
+      const file = await call(alice, "fetchConversionFile", regularDocId, start.attachments[0].rowId, 0, 100);
+      assert.deepEqual(file, { payload: b64("attached content"), size: 16 });
+
+      // Its new content goes next to it, until it's complete.
+      const { fileId } = await call(alice, "uploadEncryptedFile", regularDocId, b64("encrypted attachment"));
+      const path = home.server.getStorageManager().getPath(regularDocId);
+      assert.isTrue(await fse.pathExists(path + ".encrypting.tmp"));
+      await assert.isRejected(call(alice, "commitDocEncryption", regularDocId, "doc~new",
+        [wrap(ids["outsider@getgrist.com"])], b64("snapshot")), /copy for its creator/);
+      await call(alice, "commitDocEncryption", regularDocId, "doc~new",
+        [wrap(ids["chimpy@getgrist.com"]), wrap(ids["charon@getgrist.com"])], b64("snapshot"));
+
+      // It's an encrypted document now, which members open as such.
+      assert.deepEqual((await owner.getDoc(regularDocId)).options?.encryption, { version: 1 });
+      assert.include((await bob.send("openDoc", regularDocId)).error, ENCRYPTED_DOC_SERVER_ERROR);
+      const opened: EncryptedDocOpenResult = await call(bob, "openEncryptedDoc", regularDocId);
+      assert.deepInclude(opened.snapshot, { actionNum: 0, keyId: "doc~new", payload: b64("snapshot") });
+      assert.deepEqual(opened.myKeys.map(k => k.keyId), ["doc~new"]);
+      assert.deepEqual(await call(bob, "fetchEncryptedFile", regularDocId, fileId),
+        { payload: b64("encrypted attachment"), size: 20 });
+      // Nothing readable is left in its file.
+      assert.isFalse(await fse.pathExists(path + ".encrypting.tmp"));
+      assert.isFalse(await fse.pathExists(path + ".encrypting"));
+      const db = await SQLiteDB.openDBRaw(path);
+      try {
+        const names = (await db.all("SELECT name FROM sqlite_master WHERE type = 'table'")).map((r: any) => r.name);
+        assert.includeMembers(names, ["_gristsys_EncryptedActions", "_gristsys_EncryptedSnapshots"]);
+        assert.deepEqual(names.filter((name: string) => !name.startsWith("_gristsys_Encrypted")), []);
+      } finally {
+        await db.close();
+      }
+    });
+
+    it("makes encrypted documents regular ones again", async function() {
+      const alice = await connect("chimpy@getgrist.com");
+      const bob = await connect("charon@getgrist.com");
+      await call(alice, "openEncryptedDoc", regularDocId);
+      await call(bob, "openEncryptedDoc", regularDocId);
+      // Only owners who can read everything.
+      await assert.isRejected(call(bob, "beginDocDecryption", regularDocId), /access/i);
+      await call(alice, "beginDocDecryption", regularDocId);
+      assert.deepEqual((await nextMessage(bob, "encryptedDocLock"))?.data.lock,
+        { reason: "decrypting", userName: "Chimpy" });
+      await assert.isRejected(call(bob, "pushEncryptedAction", regularDocId, 0, "doc~new", b64("c1")),
+        /being changed by another member/);
+
+      const { fileIdent } = await call(alice, "uploadDecryptedFile", regularDocId, ".txt", b64("attached content"));
+      assert.match(fileIdent, /^[0-9a-f]{40}\.txt$/);
+      tables._grist_Attachments[3].fileIdent = [fileIdent];
+      tables.Table1[3].A = ["secret one", "secret three"];
+      const payload = await gzip(marshalValue({ tables }));
+      await assert.isRejected(call(alice, "commitDocDecryption", regularDocId, 3, b64String(payload)),
+        /changed meanwhile/);
+      await call(alice, "commitDocDecryption", regularDocId, 0, b64String(payload));
+      assert.deepEqual((await nextMessage(bob, "encryptedDocLock"))?.data,
+        { docId: regularDocId, lock: null, decrypted: true });
+
+      // A regular document again, without keys.
+      assert.isNull((await owner.getDoc(regularDocId)).options?.encryption ?? null);
+      assert.deepEqual((await owner.getDocAPI(regularDocId).getRows("Table1")).A, ["secret one", "secret three"]);
+      const resp = await fetch(owner.getDocAPI(regularDocId).getAttachmentDownloadUrl(1),
+        { headers: { Authorization: "Bearer api_key_for_chimpy" } });
+      assert.equal(await resp.text(), "attached content");
+      assert.deepEqual(await home.dbManager.connection.manager.find(DocEncryptionKeyWrap,
+        { where: { docId: regularDocId } }), []);
+      await assert.isRejected(call(alice, "openEncryptedDoc", regularDocId), /not end-to-end encrypted/);
+    });
+
+    it("turns access rules hiding columns into private columns", async function() {
+      const rulesDocId = await owner.newDoc({ name: "with rules" }, wsId);
+      const docApi = owner.getDocAPI(rulesDocId);
+      await docApi.addRows("Table1", { A: ["Ana", "Ben"], B: [52100, 61300] });
+      const addRules = (resource: { tableId: string, colIds: string }, rules: { aclFormula: string,
+        permissionsText: string }[]) => docApi.applyUserActions([
+        ["AddRecord", "_grist_ACLResources", -1, resource],
+        ...rules.map((r, i) => ["AddRecord", "_grist_ACLRules", null, { resource: -1, rulePos: i + 1, ...r }]),
+      ]);
+      // Kiwi can't read B; nobody but owners can edit A.
+      await addRules({ tableId: "Table1", colIds: "B" },
+        [{ aclFormula: "user.Email == 'kiwi@getgrist.com'", permissionsText: "-R" }]);
+      await addRules({ tableId: "Table1", colIds: "A" },
+        [{ aclFormula: "user.Access != OWNER", permissionsText: "-U" }]);
+      const alice = await connect("chimpy@getgrist.com");
+      const start = await call(alice, "beginDocEncryption", rulesDocId);
+      assert.lengthOf(start.columnAudiences, 1);
+      const colRefB = start.columnAudiences[0].colRef;
+      assert.sameMembers(start.columnAudiences[0].userIds, [ids["chimpy@getgrist.com"], ids["charon@getgrist.com"]]);
+      assert.equal(start.droppedRules, 1);
+      // The column key, for those who can read it, recorded with the document key.
+      await call(alice, "commitDocEncryption", rulesDocId, "doc~rules", [wrap(ids["chimpy@getgrist.com"])],
+        b64("snapshot"), [{ scope: "column:b", keyId: "column:b~1", colRef: colRefB,
+          wraps: [wrap(ids["chimpy@getgrist.com"]), wrap(ids["charon@getgrist.com"])] }]);
+      const opened: EncryptedDocOpenResult = await call(alice, "openEncryptedDoc", rulesDocId);
+      assert.deepEqual(opened.bindings, [{ scope: "column:b", colRef: colRefB, boundAt: 0, releasedAt: null }]);
+      assert.sameMembers(opened.keys.map(k => k.keyId), ["doc~rules", "column:b~1"]);
+      await owner.deleteDoc(rulesDocId);
+    });
+
+    it("refuses to encrypt documents whose rules depend on their content", async function() {
+      const rowsDocId = await owner.newDoc({ name: "row rules" }, wsId);
+      const docApi = owner.getDocAPI(rowsDocId);
+      await docApi.addRows("Table1", { A: ["mine", "theirs"] });
+      await docApi.applyUserActions([
+        ["AddRecord", "_grist_ACLResources", -1, { tableId: "Table1", colIds: "*" }],
+        ["AddRecord", "_grist_ACLRules", null, { resource: -1, rulePos: 1,
+          aclFormula: "user.Email == 'kiwi@getgrist.com' and rec.A == 'mine'", permissionsText: "-R" }],
+      ]);
+      const alice = await connect("chimpy@getgrist.com");
+      await assert.isRejected(call(alice, "beginDocEncryption", rowsDocId), /depend on its content/);
+      // Nothing changed: it opens as usual.
+      assert.deepEqual((await docApi.getRows("Table1")).A, ["mine", "theirs"]);
+      await owner.deleteDoc(rowsDocId);
+    });
+
+    it("drops what was prepared when interrupted", async function() {
+      const lockExpiryMs = RelayDeps.lockExpiryMs;
+      RelayDeps.lockExpiryMs = 1000;
+      const alice = await connect("chimpy@getgrist.com");
+      const path = home.server.getStorageManager().getPath(regularDocId);
+      try {
+        await call(alice, "beginDocEncryption", regularDocId);
+        assert.isTrue(await fse.pathExists(path + ".encrypting.tmp"));
+        // Its author stops (e.g. closes their browser).
+        await alice.close();
+      } finally {
+        RelayDeps.lockExpiryMs = lockExpiryMs;
+      }
+      // (Dropped once released.)
+      await waitFor(async () => !await fse.pathExists(path + ".encrypting.tmp"), 5000);
+      // Still a regular document, which opens as usual.
+      assert.deepEqual((await owner.getDocAPI(regularDocId).getRows("Table1")).A, ["secret one", "secret three"]);
+    });
+  });
 });
+
+function b64String(bytes: Uint8Array) {
+  return Buffer.from(bytes).toString("base64");
+}
+
+async function waitFor(check: () => Promise<boolean>, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!await check()) {
+    if (Date.now() > deadline) { throw new Error("Timed out"); }
+    await new Promise(r => setTimeout(r, 50));
+  }
+}

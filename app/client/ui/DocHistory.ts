@@ -1,3 +1,4 @@
+import { buildEncryptedSnapshots } from "app/client/encryption/EncryptionUI";
 import { makeT } from "app/client/lib/localization";
 import { createSessionObs } from "app/client/lib/sessionObs";
 import { getTimeFromNow } from "app/client/lib/timeUtils";
@@ -30,10 +31,8 @@ export class DocHistory extends Disposable implements IDomComponent {
 
   public buildDom() {
     // Snapshots of end-to-end encrypted documents are encrypted: the server can't list them as
-    // documents. Only the activity applies.
-    if (isEncryptedDoc(this._docPageModel.currentDoc.get())) {
-      return buildConfigContainer(this._actionLog.buildDom());
-    }
+    // documents, the browser does.
+    const isEncrypted = isEncryptedDoc(this._docPageModel.currentDoc.get());
     const tabs = [
       { value: "activity", label: t("Activity") },
       { value: "snapshots", label: t("Snapshots") },
@@ -45,7 +44,9 @@ export class DocHistory extends Disposable implements IDomComponent {
       dom.domComputed(this._subTab, subTab =>
         buildConfigContainer(
           subTab === "activity" ? this._actionLog.buildDom() :
-            subTab === "snapshots" ? dom.create(this._buildSnapshots.bind(this)) :
+            subTab === "snapshots" ? (isEncrypted ?
+              dom.create(buildEncryptedSnapshots, this._docPageModel.gristDoc.get()!) :
+              dom.create(this._buildSnapshots.bind(this))) :
               null,
         ),
       ),

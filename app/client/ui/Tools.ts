@@ -2,6 +2,7 @@ import { ACLUsersPopup } from "app/client/aclui/ACLUsers";
 import { GristDoc } from "app/client/components/GristDoc";
 import { fixOutlineOverflow } from "app/client/components/KeyboardFocusHighlighter";
 import { kbJumperAnchor } from "app/client/components/RegionFocusSwitcher";
+import { showSuggestions } from "app/client/encryption/EncryptionUI";
 import { makeT } from "app/client/lib/localization";
 import { urlState } from "app/client/models/gristUrlState";
 import { getUserOrgPrefObs, markAsSeen } from "app/client/models/UserPrefs";
@@ -118,6 +119,12 @@ export function tools(owner: Disposable, gristDoc: GristDoc, leftPanelOpen: Obse
       cssPageButton(cssPageIcon("Log"), cssLinkText(t("Document history")), testId("log"),
         dom.on("click", () => gristDoc.showTool("docHistory"))),
     ),
+    // Suggestions for encrypted documents are kept with them (see EncryptionUI.showSuggestions()).
+    dom.maybe(use => isEncrypted && gristDoc.docComm.encryption?.canEdit && use(trunkAcceptsProposals), () =>
+      cssPageEntry(
+        cssPageButton(cssPageIcon("MobileChat"), cssLinkText(t("Suggestions")), testId("encrypted-suggestions"),
+          dom.on("click", () => showSuggestions(gristDoc))),
+      )),
     dom.maybe(
       use => !isEncrypted && use(trunkAcceptsProposals), () => {
         return cssPageEntry(

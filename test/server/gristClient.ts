@@ -18,6 +18,8 @@ interface GristResponse {
   reqId: number;
   error?: string;
   errorCode?: string;
+  status?: number;
+  details?: any;
   data?: any;
 }
 
@@ -40,7 +42,7 @@ export class GristClient {
   constructor(public ws: GristClientSocket) {
     ws.onmessage = (data: string) => {
       const msg = pick(JSON.parse(data),
-        ["reqId", "error", "errorCode", "data", "type", "docFD"]);
+        ["reqId", "error", "errorCode", "status", "details", "data", "type", "docFD"]);
       if (this._ignorePresenceUpdates && msg.type === "docUserPresenceUpdate") {
         return;
       }

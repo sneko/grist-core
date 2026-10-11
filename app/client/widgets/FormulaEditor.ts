@@ -356,9 +356,10 @@ export class FormulaEditor extends NewBaseEditor {
       const withAiButton =
         this._canDetach &&
         !this.isDetached.get() &&
-        getGristConfig().assistant?.version === 1 &&
-        // The assistant sends the document's content to an AI service: not for encrypted documents.
-        !this.options.gristDoc.docComm.isEncrypted;
+        // For encrypted documents, the browser calls the AI service configured for them, if any.
+        (this.options.gristDoc.docComm.isEncrypted ?
+          Boolean(getGristConfig().encryption?.assistant) :
+          getGristConfig().assistant?.version === 1);
       editor.renderer.emptyMessageNode = cssFormulaPlaceholder(
         !withAiButton ?
           t("Enter formula.") :

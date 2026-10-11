@@ -68,11 +68,13 @@ export const ENCRYPTED_PART_BYTES = 8 * 1024 * 1024;
  * An entry of the document's history, as stored and relayed by the server:
  *  - "change": a change, encrypted with the document key keyId;
  *  - "key": the creation of a new key keyId (e.g. after the previous one of its scope got
- *    retired), with no payload. Entries after it use the new key.
+ *    retired), with no payload. Entries after it use the new key;
+ *  - "restore": the document's content was replaced (with an earlier version of it): it's the
+ *    snapshot saved with this entry, encrypted with keyId. No payload.
  */
 export interface EncryptedActionRecord {
   actionNum: number;     // Position in the document's history, starting at 1.
-  kind: "change" | "key";
+  kind: "change" | "key" | "restore";
   keyId: string;
   payload: Base64;       // Encrypted marshalled DocChangeBundle (empty for "key" entries).
   userId: number | null; // Who pushed it (as identified by the server).
@@ -89,6 +91,42 @@ export interface EncryptedSnapshotRecord {
   size: number;
   timeMs: number;
 }
+
+/** A snapshot kept by the server (without its payload), e.g. to restore it. */
+export interface EncryptedSnapshotInfo {
+  actionNum: number;
+  keyId: string;
+  size: number;
+  userId: number | null;    // Who saved it.
+  timeMs: number;           // When it was saved.
+}
+
+/**
+ * Changes suggested by a member (e.g. a viewer, when the document accepts suggestions), until a
+ * member who can edit the document applies them or dismisses them. Its payload is an encrypted
+ * marshalled SuggestionBundle (see EncryptedPayloads.ts), encrypted with the document key keyId.
+ */
+export interface EncryptedSuggestion {
+  id: number;
+  keyId: string;
+  payload: Base64;
+  userId: number | null;     // Who suggested it (as identified by the server).
+  timeMs: number;
+}
+
+/**
+ * An answer to a form of an encrypted document, encrypted for the form (see EncryptedForms.ts),
+ * waiting to be added to the document by a member who can edit it.
+ */
+export interface EncryptedInboxEntry {
+  id: number;
+  formId: string;
+  payload: Base64;
+  timeMs: number;
+}
+
+/** A payload as given to the server: inline, or uploaded by parts first (beginEncryptedUpload). */
+export type PayloadSource = Base64 | { uploadId: string };
 
 /** A key of the document (without its value, which only members get, wrapped for them). */
 export interface DocKeyInfo {
@@ -109,6 +147,42 @@ export interface ScopeBinding {
   colRef: number;
   boundAt: number;
   releasedAt: number | null;
+}
+
+/**
+ * What members recorded of the document's keys and private columns, as opposed to what the server
+ * says (which a malicious server could change, e.g. to make a private column public, or to get
+ * members to use a key it made). It's kept within the encrypted document (in snapshots, and in
+ * the history's key entries, see KeyChangeRecord), which the server can't forge: browsers trust
+ * only keys recorded there, take the latest one of each scope as current, and treat a column as
+ * private if either the server or this record says so.
+ */
+export interface KeyHistory {
+  keys: KeyHistoryEntry[];
+  bindings: ScopeBinding[];
+}
+
+export interface KeyHistoryEntry {
+  keyId: string;
+  scope: string;
+  actionNum: number;
+  // The keyId, encrypted with the key itself by its creator: members check that the copy the
+  // server gives them is of that key (and not of another one with the same id).
+  check?: Base64;
+}
+
+/**
+ * Recorded with each key entry of the history, by the member making the change, encrypted with the
+ * document key current before it (see KeyHistory).
+ */
+export interface KeyChangeRecord {
+  v: 1;
+  actionNum: number;
+  scope: string;
+  keyId: string;          // The new key, or the current key of the scope made public.
+  check?: Base64;         // For a new key (see KeyHistoryEntry).
+  colRef?: number;        // For the first key of a column scope: the column made private.
+  release?: boolean;      // For a column made public again.
 }
 
 /** A member's copy of a key, wrapped for them by the encryption service. */
@@ -170,12 +244,41 @@ export interface NewKeyRequest {
   baseActionNum: number;
   // For the first key of a column scope: the column it makes private.
   colRef?: number;
+  // The encrypted KeyChangeRecord (see KeyHistory), recorded as the history entry's payload.
+  record?: Base64;
+  // A snapshot of the document as of the key change, saved along with it (encrypted with the
+  // document key current after it), so that both happen together or not at all. With
+  // `compact`, older snapshots and changes are dropped (by owners, e.g. when making a column
+  // private, so that its values aren't available anymore in readable form).
+  snapshot?: PayloadSource;
+  compact?: boolean;
 }
 
 /** Broadcast by the server to browsers that have the document open, for each new entry. */
 export interface EncryptedActionMessage {
   docId: string;
   action: EncryptedActionRecord;
+}
+
+/**
+ * Why a document is locked by a member for a while (others can't change it meanwhile):
+ *  - "encrypting", "decrypting": the document is being converted to or from encryption;
+ *  - "restoring": an earlier version of the document is being restored.
+ */
+export interface DocLockInfo {
+  reason: "encrypting" | "decrypting" | "restoring";
+  userName: string;
+}
+
+/**
+ * Broadcast to browsers that have an encrypted document open when it gets locked (`lock` set),
+ * unlocked (`lock` null), or when it stopped being encrypted (`decrypted` set: it must be opened
+ * again, as a regular document).
+ */
+export interface EncryptedLockMessage {
+  docId: string;
+  lock: DocLockInfo | null;
+  decrypted?: boolean;
 }
 
 /** Broadcast when keys change, e.g. so that a member waiting for a key can proceed. */

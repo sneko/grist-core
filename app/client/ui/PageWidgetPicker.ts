@@ -269,9 +269,7 @@ export function buildPageWidgetPicker(
   // dom
   return cssPopupWrapper(
     dom.create(PageWidgetSelect,
-      value, tables, columns, onSaveCB, behavioralPromptsManager,
-      // Forms take submissions through the server, which can't write to encrypted documents.
-      { ...options, noForms: gristDoc.docComm.isEncrypted }),
+      value, tables, columns, onSaveCB, behavioralPromptsManager, options),
 
     (elem) => {
       FocusLayer.create(ctl, { defaultFocusElem: elem, pauseMousetrap: true });
@@ -324,9 +322,6 @@ export interface ISelectOptions {
   // user changes in the selected page widget (type, table, summary ...) and we update the "SELECT
   // BY" dropdown with the result list of options. The "SELECT BY" dropdown is hidden if omitted.
   selectBy?: (val: IPageWidget) => IOption<string>[];
-
-  // Whether to leave out forms.
-  noForms?: boolean;
 }
 
 // the list of widget types in the order they should be listed by the widget.
@@ -437,7 +432,7 @@ export class PageWidgetSelect extends Disposable {
             "aria-describedby": "picker-kb-help",
           },
           header(t("Select widget"), { id: "picker-widgets-header" }),
-          sectionTypes.filter(value => !(value === "form" && this._options.noForms)).map((value) => {
+          sectionTypes.map((value) => {
             const widgetInfo = getWidgetTypes(value);
             const disabled = computed(this._value.table,
               (use, tid) => this._isTypeDisabled(value, tid, use(this._value.summarize)),

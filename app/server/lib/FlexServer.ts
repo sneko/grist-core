@@ -56,6 +56,7 @@ import {
 import { DocWorkerLoadTracker, getDocWorkerLoadTracker } from "app/server/lib/DocWorkerLoadTracker";
 import { DocWorkerInfo, IDocWorkerMap } from "app/server/lib/DocWorkerMap";
 import { isEncryptionEnabled } from "app/server/lib/encryption/encryptionConfig";
+import { EncryptionConversion } from "app/server/lib/encryption/EncryptionConversion";
 import { EncryptionRelay } from "app/server/lib/encryption/EncryptionRelay";
 import { addEncryptionEngineEndpoints } from "app/server/lib/encryption/engineAssets";
 import { expressWrap, jsonErrorHandler, secureJsonErrorHandler } from "app/server/lib/expressWrap";
@@ -1776,6 +1777,9 @@ export class FlexServer implements GristServer {
       this._encryptionRelay = new EncryptionRelay(this._dbManager, this.getStorageManager(),
         this.getDocNotificationManager());
       this._encryptionRelay.registerCommMethods(this._comm);
+      this._encryptionRelay.addFormEndpoints(this.app);
+      new EncryptionConversion(this._dbManager, this.getStorageManager(), docManager, this._encryptionRelay)
+        .registerCommMethods(this._comm);
     }
 
     // Doc-specific endpoints require authorization; collect the relevant middleware in one list.

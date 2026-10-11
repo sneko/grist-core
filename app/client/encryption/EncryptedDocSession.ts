@@ -15,29 +15,50 @@
  * private columns) and encrypted attachments.
  */
 import { Comm } from "app/client/components/Comm";
+import {
+  copyDocument, decryptDocument, makeFormAnswerHelpers, makeVaultIdFor, ProgressCallback,
+} from "app/client/encryption/DocConversion";
+import { downloadFromDrive, driveFileIdFromUrl } from "app/client/encryption/driveImport";
 import { reportKeyGrant } from "app/client/encryption/EncryptionUI";
 import { getKeyVault } from "app/client/encryption/keyVaults";
+import { getLocalAssistance } from "app/client/encryption/localAssistant";
+import { isLockedHere, lockingHere, showLockOverlay } from "app/client/encryption/lockOverlay";
 import { IDocEncryption, KeyGrantResult } from "app/client/encryption/types";
 import { WorkerEngine } from "app/client/encryption/WorkerEngine";
 import { makeT } from "app/client/lib/localization";
 import { checkBrowserUploadSizeLimit } from "app/client/lib/uploads";
 import { reportError, reportMessage } from "app/client/models/errors";
+import { urlState } from "app/client/models/gristUrlState";
 import { bigBasicButton, bigPrimaryButton } from "app/client/ui2018/buttons";
 import { cssModalBody, cssModalButtons, cssModalTitle, modal } from "app/client/ui2018/modals";
 import { ActiveDocAPI } from "app/common/ActiveDocAPI";
-import { CommEncryptedDocAction, CommEncryptedDocKeys } from "app/common/CommTypes";
+import {
+  CommEncryptedDocAction, CommEncryptedDocInbox, CommEncryptedDocKeys, CommEncryptedDocLock,
+  CommEncryptedDocSuggestions,
+} from "app/common/CommTypes";
 import { CellValue } from "app/common/DocActions";
 import { OpenLocalDocResult } from "app/common/DocListAPI";
+import { EncryptionAccessError } from "app/common/encryption/ColumnPrivacy";
 import { decryptFile, encryptFile, makeFileIdent, parseFileIdent } from "app/common/encryption/EncryptedAttachments";
-import { base64ToBytes, bytesToBase64, IKeyVault, KeyRecipient } from "app/common/encryption/EncryptionCrypto";
 import {
-  Base64, DOC_SCOPE, DocKeyRecord, ENCRYPTED_PART_BYTES, EncryptedActionRecord, EncryptedDocOpenResult,
-  EncryptedPushResult, EncryptedSnapshotRecord, EncryptionKeysResult, EncryptionMember, makeColumnScope, makeKeyId,
-  NewKeyRequest,
+  EncryptedFormKeys, encryptFormSpec, generateFormKeys, makeEncryptedFormShareKey,
+} from "app/common/encryption/EncryptedForms";
+import {
+  base64ToBytes, bytesToBase64, IKeyVault, KeyRecipient, utf8Encode,
+} from "app/common/encryption/EncryptionCrypto";
+import {
+  Base64, DOC_SCOPE, DocKeyRecord, DocLockInfo, ENCRYPTED_PART_BYTES, EncryptedActionRecord, EncryptedDocOpenResult,
+  EncryptedInboxEntry, EncryptedPushResult, EncryptedSnapshotInfo, EncryptedSnapshotRecord, EncryptedSuggestion,
+  EncryptionKeysResult,
+  EncryptionMember, makeColumnScope, makeKeyId, NewKeyRequest, PayloadSource,
 } from "app/common/encryption/EncryptionTypes";
+import {
+  buildFormSpec, getFormScopes, getFormShareOptions, getPublishedForms, readFormAnswers,
+} from "app/common/encryption/FormSpecs";
 import { Keyring } from "app/common/encryption/Keyring";
 import {
-  IEncryptionRelay, InvalidChange, LocalActiveDoc, LocalDocUserAction, NeedsReloadError,
+  DocRestoredError, IEncryptionRelay, InvalidChange, LocalActiveDoc, LocalDocUserAction, NeedsReloadError,
+  SuggestionInfo,
 } from "app/common/encryption/LocalActiveDoc";
 import { addParsedTables, parseFileLocally } from "app/common/encryption/LocalImport";
 import { EncryptionClientConfig } from "app/common/gristUrls";
@@ -45,6 +66,8 @@ import { User } from "app/common/User";
 
 import { Semaphore } from "async-mutex";
 import { Disposable, dom, Emitter } from "grainjs";
+import isEqual from "lodash/isEqual";
+import omit from "lodash/omit";
 
 const t = makeT("EncryptedDocSession");
 
@@ -69,27 +92,58 @@ export class CommRelay implements IEncryptionRelay {
     return this._call("fetchEncryptedActions", afterActionNum);
   }
 
-  public pushAction(baseActionNum: number, keyId: string, payload: Base64): Promise<EncryptedPushResult> {
-    return this._call("pushEncryptedAction", baseActionNum, keyId, payload);
+  public pushAction(baseActionNum: number, keyId: string, payload: Base64,
+    options?: { consumeInbox?: number[] }): Promise<EncryptedPushResult> {
+    return this._call("pushEncryptedAction", baseActionNum, keyId, payload, ...(options ? [options] : []));
   }
+
+  public listInbox(): Promise<EncryptedInboxEntry[]> { return this._call("listEncryptedInbox"); }
+  public dropInbox(ids: number[]): Promise<void> { return this._call("dropEncryptedInbox", ids); }
+  public publishForm(formId: string, spec: Base64): Promise<void> {
+    return this._call("publishEncryptedForm", formId, spec);
+  }
+
+  public unpublishForm(formId: string): Promise<void> { return this._call("unpublishEncryptedForm", formId); }
 
   public async saveSnapshot(actionNum: number, keyId: string, payload: Uint8Array, options?: { compact?: boolean }) {
     await this._call("saveEncryptedSnapshot", actionNum, keyId, await this._send(payload), options || {});
   }
 
   public fetchSnapshot(snapshot: EncryptedSnapshotRecord): Promise<Uint8Array> {
-    return this._receive(snapshot.size, (offset, length) =>
+    return this.receive(snapshot.size, (offset, length) =>
       this._call("fetchEncryptedSnapshot", snapshot.actionNum, offset, length));
   }
 
   public getKeys(): Promise<EncryptionKeysResult> { return this._call("getEncryptionKeys"); }
   public listMembers(): Promise<EncryptionMember[]> { return this._call("listEncryptionMembers"); }
-  public createKey(request: NewKeyRequest): Promise<EncryptedPushResult> {
-    return this._call("createEncryptionKey", request);
+  public async createKey(request: NewKeyRequest,
+    snapshot?: { payload: Uint8Array, compact: boolean }): Promise<EncryptedPushResult> {
+    return this._call("createEncryptionKey", snapshot ?
+      { ...request, snapshot: await this._send(snapshot.payload), compact: snapshot.compact } : request);
   }
 
-  public releaseScope(scope: string, baseActionNum: number): Promise<EncryptedPushResult> {
-    return this._call("releaseEncryptionScope", scope, baseActionNum);
+  public listSnapshots(): Promise<EncryptedSnapshotInfo[]> { return this._call("listEncryptedSnapshots"); }
+  public getSnapshot(actionNum: number): Promise<EncryptedSnapshotRecord> {
+    return this._call("getEncryptedSnapshot", actionNum);
+  }
+
+  public async restoreSnapshot(baseActionNum: number, keyId: string,
+    payload: Uint8Array): Promise<EncryptedPushResult> {
+    return this._call("restoreEncryptedSnapshot", baseActionNum, keyId, await this._send(payload));
+  }
+
+  public submitSuggestion(keyId: string, payload: Base64): Promise<number> {
+    return this._call("submitEncryptedSuggestion", keyId, payload);
+  }
+
+  public listSuggestions(): Promise<EncryptedSuggestion[]> { return this._call("listEncryptedSuggestions"); }
+  public resolveSuggestion(id: number): Promise<void> { return this._call("resolveEncryptedSuggestion", id); }
+
+  public lock(reason: DocLockInfo["reason"]): Promise<void> { return this._call("lockEncryptedDoc", reason); }
+  public unlock(): Promise<void> { return this._call("unlockEncryptedDoc"); }
+
+  public releaseScope(scope: string, baseActionNum: number, record?: Base64): Promise<EncryptedPushResult> {
+    return this._call("releaseEncryptionScope", scope, baseActionNum, ...(record ? [record] : []));
   }
 
   public shareKeys(wraps: DocKeyRecord[]): Promise<void> { return this._call("shareEncryptionKeys", wraps); }
@@ -107,23 +161,22 @@ export class CommRelay implements IEncryptionRelay {
     const first: { payload: Base64, size: number } =
       await this._call("fetchEncryptedFile", fileId, 0, ENCRYPTED_PART_BYTES);
     if (first.size <= ENCRYPTED_PART_BYTES) { return base64ToBytes(first.payload); }
-    return this._receive(first.size, async (offset, length) => offset === 0 ? first.payload :
+    return this.receive(first.size, async (offset, length) => offset === 0 ? first.payload :
       (await this._call("fetchEncryptedFile", fileId, offset, length)).payload);
   }
 
-  // A payload as the server takes it: inline if small enough, or uploaded by parts first.
-  private async _send(payload: Uint8Array): Promise<Base64 | { uploadId: string }> {
-    if (payload.length <= ENCRYPTED_PART_BYTES) { return bytesToBase64(payload); }
-    const uploadId: string = await this._call("beginEncryptedUpload");
-    for (let seq = 0, offset = 0; offset < payload.length; seq++, offset += ENCRYPTED_PART_BYTES) {
-      await this._call("appendEncryptedUpload", uploadId, seq,
-        bytesToBase64(payload.subarray(offset, offset + ENCRYPTED_PART_BYTES)));
-    }
-    return { uploadId };
+  /** A payload as the server takes it: inline if small enough, or uploaded by parts first. */
+  public async send(payload: Uint8Array): Promise<PayloadSource> {
+    return this._send(payload);
   }
 
-  // Gets a payload of the given size by parts.
-  private async _receive(size: number, fetchPart: (offset: number, length: number) => Promise<Base64>) {
+  /** Calls a method of the server about this document. */
+  public call(method: string, ...args: any[]): Promise<any> {
+    return this._call(method, ...args);
+  }
+
+  /** Gets a payload of the given size by parts. */
+  public async receive(size: number, fetchPart: (offset: number, length: number) => Promise<Base64>) {
     const result = new Uint8Array(size);
     for (let offset = 0; offset < size; offset += ENCRYPTED_PART_BYTES) {
       const part = base64ToBytes(await fetchPart(offset, Math.min(ENCRYPTED_PART_BYTES, size - offset)));
@@ -131,6 +184,17 @@ export class CommRelay implements IEncryptionRelay {
       result.set(part, offset);
     }
     return result;
+  }
+
+  // A payload as the server takes it: inline if small enough, or uploaded by parts first.
+  private async _send(payload: Uint8Array): Promise<PayloadSource> {
+    if (payload.length <= ENCRYPTED_PART_BYTES) { return bytesToBase64(payload); }
+    const uploadId: string = await this._call("beginEncryptedUpload");
+    for (let seq = 0, offset = 0; offset < payload.length; seq++, offset += ENCRYPTED_PART_BYTES) {
+      await this._call("appendEncryptedUpload", uploadId, seq,
+        bytesToBase64(payload.subarray(offset, offset + ENCRYPTED_PART_BYTES)));
+    }
+    return { uploadId };
   }
 
   private _call(method: string, ...args: any[]): Promise<any> {
@@ -144,7 +208,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
    * access). Returns the session, and what the rest of the client expects from opening a doc.
    */
   public static async open(comm: Comm, docId: string, config: EncryptionClientConfig,
-    options: { isCancelled?: () => boolean } = {},
+    options: { isCancelled?: () => boolean, canSuggest?: boolean } = {},
   ): Promise<{ session: EncryptedDocSession, openResponse: OpenLocalDocResult }> {
     const relay = new CommRelay(comm, docId);
     const cancellation = new Cancellation(options.isCancelled);
@@ -157,8 +221,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
       while (!await vault.hasKeys()) {
         await promptKeySetup(vault, cancellation);
       }
-      const vaultIdFor = (m: { userId: number, vaultUserId: string | null }) =>
-        m.vaultUserId || (config.mockVault ? mockVaultUserId(m.userId) : null);
+      const vaultIdFor = makeVaultIdFor(config);
 
       const keyring = new Keyring(vault, () => relay.getKeys(), openResult);
       while (!keyring.canUseScope(DOC_SCOPE)) {
@@ -178,8 +241,8 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
 
       engine = await WorkerEngine.create();
       cancellation.check();
-      session = new EncryptedDocSession(comm, docId, relay, keyring, engine, openResult, vaultIdFor);
-      await session._open(openResult);
+      session = new EncryptedDocSession(comm, docId, relay, keyring, engine, openResult, vaultIdFor, config);
+      await session._open(openResult, Boolean(options.canSuggest));
       cancellation.check();
       return { session, openResponse: await session._makeOpenResponse(openResult) };
     } catch (e) {
@@ -195,6 +258,8 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
   public readonly docFD = _nextDocFD--;
   // Emitted when keys or members change, or which columns are private.
   public readonly keysChanged = this.autoDispose(new Emitter());
+  // Emitted when suggestions are added or handled, or when changes are made while suggesting.
+  public readonly suggestionsChanged = this.autoDispose(new Emitter());
 
   private _localDoc: LocalActiveDoc;
   // Changes from others are held back until the document is shown (see resume()).
@@ -205,6 +270,11 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
   private _attachmentUrls = new Map<number, Promise<string>>();
   private _attachmentFetches = new Semaphore(MAX_PARALLEL_ATTACHMENT_FETCHES);
   private _lastPrivacy = "";
+  private _lockOverlay?: ReturnType<typeof showLockOverlay>;
+  private _importScheduled = false;
+  private _formSyncTimer?: ReturnType<typeof setTimeout>;
+  // What respondents of each form were last given (as JSON), by formId.
+  private _uploadedSpecs = new Map<string, string>();
 
   private constructor(
     private _comm: Comm,
@@ -214,6 +284,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     private _engine: WorkerEngine,
     private _openResult: EncryptedDocOpenResult,
     private _vaultIdFor: (m: { userId: number, vaultUserId: string | null }) => string | null,
+    private _config: EncryptionClientConfig,
   ) {
     super();
     this.onDispose(() => {
@@ -222,6 +293,11 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
       this._engine.terminate();
       this._comm.stopListening(this._comm, "encryptedDocAction", this._onDocAction);
       this._comm.stopListening(this._comm, "encryptedDocKeys", this._onDocKeys);
+      this._comm.stopListening(this._comm, "encryptedDocLock", this._onDocLock);
+      this._comm.stopListening(this._comm, "encryptedDocSuggestions", this._onSuggestions);
+      this._comm.stopListening(this._comm, "encryptedDocInbox", this._onInbox);
+      if (this._formSyncTimer) { clearTimeout(this._formSyncTimer); }
+      this._lockOverlay?.close();
       this._comm.stopListening(this._comm, "clientConnect", this._onConnect);
       for (const url of this._attachmentUrls.values()) { url.then(u => URL.revokeObjectURL(u)).catch(() => {}); }
     });
@@ -263,6 +339,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
         UPDATE_CURRENT_TIME_MS / 6 + Math.random() * 60 * 1000);
     }
     this._offerPendingKeys().catch(e => console.warn("Encryption: could not check members' keys", e));
+    this._importAnswersSoon();
   }
 
   /** Serves the ActiveDocAPI method `name` for this document. */
@@ -283,6 +360,13 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
       case "stopBundleUserActions": return doc.stopBundleUserActions();
       case "waitForInitialization": return;
       case "listActiveUserProfiles": return [];
+      case "getAssistance": {
+        const assistant = this._config.assistant;
+        if (!assistant || !args[0] || !("tableId" in args[0].context)) {
+          throw new Error(t("The AI assistant is not available for end-to-end encrypted documents"));
+        }
+        return getLocalAssistance(assistant, doc, args[0]);
+      }
       case "closeDoc": {
         this._localDoc.close();
         await this._relay.close().catch(() => {});
@@ -355,9 +439,9 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     }
     const recipients: (KeyRecipient & { userId: number })[] = ready.map(m =>
       ({ userId: m.userId, vaultUserId: this._vaultIdFor(m)!, email: m.email, name: m.name }));
-    await this._localDoc.createScopeKey(makeColumnScope(), recipients, colRef);
-    // Values shared so far were readable by all members: keep only the private version.
-    await this._localDoc.saveSnapshot({ compact: true });
+    // Values shared so far were readable by all members: keep only the private version (saved
+    // along with the key change).
+    await this._localDoc.createScopeKey(makeColumnScope(), recipients, colRef, { compact: true });
     this.keysChanged.emit();
     return { granted: ready.filter(m => m.userId !== this.userId), notReady };
   }
@@ -451,6 +535,152 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     return tableIds;
   }
 
+  /**
+   * Imports a file from Google Drive (given its URL, and the authorization code the user got from
+   * Google), downloading and parsing it in the browser. Returns the new tables' ids.
+   */
+  public async importFromGoogleDrive(url: string, code: string): Promise<string[]> {
+    const fileId = driveFileIdFromUrl(url);
+    if (!fileId) { throw new Error(t("This is not a link to a Google Drive file")); }
+    const { accessToken } = await this._relay.call("getGoogleDriveToken", code);
+    const { name, data } = await downloadFromDrive(fileId, accessToken);
+    const parsed = await parseFileLocally(this._engine, name, data);
+    return addParsedTables(parsed, name, this._localDoc.docData,
+      (actions, options) => this._localDoc.applyUserActions(actions, options));
+  }
+
+  /**
+   * Publishes a form section as an encrypted form (see EncryptedForms.ts): gives it keys (kept in
+   * the document) if it has none yet, and stores what respondents get, encrypted, on the server.
+   */
+  public async publishForm(sectionId: number): Promise<void> {
+    const options = getFormShareOptions(this._localDoc.docData, sectionId);
+    let keys = options.encryptedForm || await generateFormKeys();
+    // Answers filling private columns are only for members who can read them: the form's private
+    // key gets sealed with their keys (those this member holds: fields of others are left out).
+    const scopes = getFormScopes(this._localDoc.docData, this._localDoc.privacy, sectionId)
+      .filter(scope => this._keyring.canUseScope(scope));
+    if (!isEqual(scopes, keys.scopes || [])) {
+      const privateKey = await makeFormAnswerHelpers(this._relay, this._keyring).getPrivateKey(keys);
+      if (!privateKey) { throw new Error(t("Only members who can read the columns this form fills can publish it")); }
+      const rest = omit(keys, "privateKey", "sealedPrivateKey");
+      const keyIds = scopes.map(scope => this._keyring.currentKeyId(scope));
+      keys = scopes.length === 0 ? { ...rest, privateKey, scopes: [] } : {
+        ...rest, scopes,
+        sealedPrivateKey: {
+          keyIds, data: bytesToBase64(await this._keyring.encryptWithAll(keyIds, utf8Encode(privateKey))),
+        },
+      };
+    }
+    await this._localDoc.applyUserActions([["UpdateRecord", "_grist_Views_section", sectionId, {
+      shareOptions: JSON.stringify({ ...options, form: true, publish: true, encryptedForm: keys }),
+    }]], { desc: "Publish form" });
+    await this._uploadFormSpec(sectionId, keys);
+  }
+
+  /** Stops taking answers to a form (answers sent before still get added to the document). */
+  public async unpublishForm(sectionId: number): Promise<void> {
+    const options = getFormShareOptions(this._localDoc.docData, sectionId);
+    if (options.encryptedForm) { await this._relay.unpublishForm(options.encryptedForm.formId); }
+    await this._localDoc.applyUserActions([["UpdateRecord", "_grist_Views_section", sectionId, {
+      shareOptions: JSON.stringify({ ...options, publish: false }),
+    }]], { desc: "Unpublish form" });
+  }
+
+  /** The link to a published form (with its link key, after "#"). */
+  public getFormUrl(sectionId: number): string | null {
+    const keys = getFormShareOptions(this._localDoc.docData, sectionId).encryptedForm;
+    if (!keys) { return null; }
+    const url = urlState().makeUrl({
+      doc: undefined, form: { shareKey: makeEncryptedFormShareKey(this._docId, keys.formId), vsId: sectionId },
+    });
+    return `${url}#${keys.linkKey}`;
+  }
+
+  /** Whether the user can read all of the document (needed to decrypt or copy it). */
+  public get canReadAll() { return this._localDoc.canReadAll; }
+
+  /** Whether the user's changes are suggestions (they can't edit the document, but may suggest). */
+  public get isSuggesting() { return this._localDoc.isSuggesting; }
+  public get pendingSuggestionCount() { return this._localDoc.pendingSuggestionCount; }
+
+  public async submitSuggestion(desc: string): Promise<void> {
+    await this._localDoc.submitSuggestion(desc);
+    this.suggestionsChanged.emit();
+  }
+
+  public async discardSuggestion(): Promise<void> {
+    await this._localDoc.discardSuggestion();
+    this.suggestionsChanged.emit();
+  }
+
+  public async listSuggestions(): Promise<(SuggestionInfo & { userName: string })[]> {
+    const suggestions = await this._localDoc.listSuggestions();
+    const members = await this.listMembers().catch(() => []);
+    return suggestions.map((s) => {
+      const member = members.find(m => m.userId === s.userId);
+      return { ...s, userName: member?.name || member?.email || "" };
+    });
+  }
+
+  public async applySuggestion(id: number): Promise<void> {
+    await this._localDoc.applySuggestion(id);
+  }
+
+  public async dismissSuggestion(id: number): Promise<void> {
+    await this._localDoc.dismissSuggestion(id);
+  }
+
+  /** The snapshots the server keeps (versions the document can be restored to), newest first. */
+  public async listSnapshots(): Promise<(EncryptedSnapshotInfo & { userName: string })[]> {
+    const snapshots = await this._relay.listSnapshots();
+    const members = await this.listMembers().catch(() => []);
+    return snapshots.map((s) => {
+      const member = members.find(m => m.userId === s.userId);
+      return { ...s, userName: member?.name || member?.email || "" };
+    });
+  }
+
+  /**
+   * Restores the version of the document saved in a snapshot (by an owner who can read all of
+   * it). Others see it's in progress meanwhile; then everyone reloads the document.
+   */
+  public async restoreSnapshot(actionNum: number): Promise<void> {
+    const doneLocking = lockingHere(this._docId, () => this._relay.call("renewDocLock"));
+    await this._relay.lock("restoring");
+    try {
+      await this._localDoc.restoreSnapshot(actionNum);
+    } finally {
+      await this._relay.unlock().catch(() => {});
+      doneLocking();
+    }
+    window.location.reload();
+  }
+
+  /**
+   * Makes the document a regular one, no longer end-to-end encrypted (by an owner who can read all
+   * of it): its private columns get hidden by access rules from members who couldn't read them.
+   * Every browser that has it open then reopens it.
+   */
+  public async decryptDocument(onProgress: ProgressCallback): Promise<void> {
+    await decryptDocument(this._relay, this._docId, this._localDoc, this._keyring, onProgress);
+  }
+
+  /**
+   * Copies the document (all of it, so by a member who can read all of it) into newDocId, a new
+   * encrypted document: private columns stay private, and members of the copy get the keys they
+   * held in the original.
+   */
+  public async copyTo(newDocId: string, options: { asTemplate: boolean },
+    onProgress: ProgressCallback): Promise<{ waitingMembers: string[] }> {
+    const userId = this.userId;
+    const vaultUserId = userId ? this._vaultIdFor({ userId, vaultUserId: this._openResult.user.vaultUserId }) : null;
+    if (!userId || !vaultUserId) { throw new Error(t("Your account is not known to the encryption service")); }
+    return copyDocument(this._comm, newDocId, {
+      relay: this._relay, localDoc: this._localDoc, keyring: this._keyring, userId, vaultIdFor: this._vaultIdFor,
+    }, options, onProgress);
+  }
+
   /** Builds an Excel workbook in the browser (with the data engine's own library). */
   public async exportXlsx(sheets: [string, string[], CellValue[][]][]): Promise<Uint8Array> {
     return base64ToBytes(await this._engine.call("export_xlsx", sheets));
@@ -505,7 +735,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     return { data: await decryptFile(this._keyring, ref, ciphertext), fileName: record.fileName };
   }
 
-  private async _open(openResult: EncryptedDocOpenResult) {
+  private async _open(openResult: EncryptedDocOpenResult, canSuggest: boolean) {
     const user = openResult.user;
     this._localDoc = await LocalActiveDoc.open({
       engine: this._engine,
@@ -514,6 +744,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
       engineUser: makeUser(openResult).toJSON(),
       userName: user.email || "",
       canEdit: openResult.access === "owners" || openResult.access === "editors",
+      canSuggest,
       onDocUserAction: action => this._emitDocUserAction(action),
       vaultIdFor: this._vaultIdFor,
       newDocSettings: (openResult.access === "owners") ? {
@@ -525,6 +756,9 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     }, openResult);
     this._comm.listenTo(this._comm, "encryptedDocAction", this._onDocAction);
     this._comm.listenTo(this._comm, "encryptedDocKeys", this._onDocKeys);
+    this._comm.listenTo(this._comm, "encryptedDocLock", this._onDocLock);
+    this._comm.listenTo(this._comm, "encryptedDocSuggestions", this._onSuggestions);
+    this._comm.listenTo(this._comm, "encryptedDocInbox", this._onInbox);
     this._comm.listenTo(this._comm, "clientConnect", this._onConnect);
   }
 
@@ -548,6 +782,81 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     }
   };
 
+  private _onInbox = (message: CommEncryptedDocInbox) => {
+    if (message.data.docId !== this._docId || this.isDisposed() || this._paused) { return; }
+    this._importAnswersSoon();
+  };
+
+  // Answers to forms are added to the document by members who can edit it, as soon as any of them
+  // has it open (and can add them).
+  private _importAnswersSoon() {
+    if (!this.canEdit || this._importScheduled) { return; }
+    this._importScheduled = true;
+    setTimeout(() => {
+      this._importScheduled = false;
+      if (this.isDisposed()) { return; }
+      this._track(this._localDoc.importFormAnswers(entries =>
+        readFormAnswers(this._localDoc.docData, this._localDoc.privacy, entries,
+          makeFormAnswerHelpers(this._relay, this._keyring)),
+      ).then(() => {}).catch((e) => {
+        // Answers this member can't add (e.g. they'd need keys they don't hold) are left for others.
+        if (e instanceof EncryptionAccessError) {
+          console.warn("[encryption] Leaving form answers to members with access", e);
+        } else {
+          throw e;
+        }
+      }));
+    }, 500);
+  }
+
+  // Published forms get what respondents see updated after changes made here.
+  private _syncFormsSoon() {
+    if (!this.canEdit || this._formSyncTimer) { return; }
+    this._formSyncTimer = setTimeout(() => {
+      this._formSyncTimer = undefined;
+      if (this.isDisposed()) { return; }
+      this._syncForms().catch(e => console.warn("[encryption] Could not update published forms", e));
+    }, 2000);
+  }
+
+  private async _syncForms() {
+    for (const { sectionId, keys } of getPublishedForms(this._localDoc.docData)) {
+      await this._uploadFormSpec(sectionId, keys);
+    }
+  }
+
+  private async _uploadFormSpec(sectionId: number, keys: EncryptedFormKeys) {
+    const spec = await buildFormSpec(this._localDoc.docData, this._localDoc.privacy, sectionId, keys,
+      async tableId => (await this._localDoc.fetchTable(tableId)).tableData);
+    const json = JSON.stringify(spec);
+    if (this._uploadedSpecs.get(keys.formId) === json) { return; }
+    await this._relay.publishForm(keys.formId, bytesToBase64(await encryptFormSpec(keys.linkKey, spec)));
+    this._uploadedSpecs.set(keys.formId, json);
+  }
+
+  private _onSuggestions = (message: CommEncryptedDocSuggestions) => {
+    if (message.data.docId !== this._docId || this.isDisposed()) { return; }
+    this.suggestionsChanged.emit();
+  };
+
+  // Someone locked the document for a while (e.g. to restore an earlier version), or unlocked it.
+  private _onDocLock = (message: CommEncryptedDocLock) => {
+    if (message.data.docId !== this._docId || this.isDisposed()) { return; }
+    if (message.data.decrypted) {
+      // It's a regular document now: it must be opened as such.
+      window.location.reload();
+      return;
+    }
+    const lock = message.data.lock;
+    if (lock && !isLockedHere(this._docId)) {
+      if (this._lockOverlay) { this._lockOverlay.update(lock); } else { this._lockOverlay = showLockOverlay(lock); }
+    } else if (!lock) {
+      this._lockOverlay?.close();
+      this._lockOverlay = undefined;
+      this._track(this._localDoc.sync());
+    }
+  };
+
   private _onDocKeys = (message: CommEncryptedDocKeys) => {
     if (message.data.docId !== this._docId || this.isDisposed()) { return; }
     this._track(this._localDoc.refreshKeys().then(() => this.keysChanged.emit()));
@@ -565,7 +874,9 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     this._comm.trackLocalWork(work).catch((e) => {
       // Work in progress fails when the document gets closed: that's expected.
       if (this.isDisposed()) { return; }
-      if (e instanceof NeedsReloadError) {
+      if (e instanceof DocRestoredError) {
+        offerReload(t("An earlier version of this document was restored: it needs reloading."));
+      } else if (e instanceof NeedsReloadError) {
         offerReload(e.message);
       } else {
         reportError(e);
@@ -584,6 +895,10 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
   }
 
   private _emitDocUserAction(action: LocalDocUserAction) {
+    if (this._localDoc?.isSuggesting) { setTimeout(() => this.suggestionsChanged.emit(), 0); }
+    if (action.fromSelf && this._localDoc && getPublishedForms(this._localDoc.docData).length > 0) {
+      this._syncFormsSoon();
+    }
     this._comm.trigger("docUserAction", {
       type: "docUserAction",
       docFD: this.docFD,
@@ -636,10 +951,6 @@ function makeUser(openResult: EncryptedDocOpenResult): User {
   });
 }
 
-function mockVaultUserId(userId: number) {
-  return `grist-user-${userId}`;
-}
-
 /** Creates the key of a new document, for its owner. */
 async function createDocumentKey(vault: IKeyVault, relay: CommRelay, openResult: EncryptedDocOpenResult,
   vaultIdFor: (m: { userId: number, vaultUserId: string | null }) => string | null) {
@@ -681,6 +992,16 @@ class Cancellation {
 
   public dispose() {
     if (this._timer) { clearInterval(this._timer); }
+  }
+}
+
+/** Makes sure the user set up their encryption keys, asking them to (until they did or gave up). */
+export async function ensureVaultKeys(vault: IKeyVault): Promise<void> {
+  const cancellation = new Cancellation();
+  try {
+    while (!await vault.hasKeys()) { await promptKeySetup(vault, cancellation); }
+  } finally {
+    cancellation.dispose();
   }
 }
 

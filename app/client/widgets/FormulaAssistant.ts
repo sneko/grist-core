@@ -45,7 +45,10 @@ export class FormulaAssistant extends Disposable {
     `u:${this._appModel.currentUser?.id ?? 0};formulaAssistantExpanded`, true));
 
   /** Is assistant features are enabled (not for encrypted documents: it sends their content to an AI service) */
-  private _assistantEnabled = getGristConfig().assistant?.version === 1 && !this._gristDoc.docComm.isEncrypted;
+  private _assistantEnabled = this._gristDoc.docComm.isEncrypted ?
+    Boolean(getGristConfig().encryption?.assistant) :
+    getGristConfig().assistant?.version === 1;
+
   /** Preview column ref */
   private _transformColRef: string;
   /** Preview column id */

@@ -370,7 +370,7 @@ export class FormView extends BaseView {
 
     this._remoteShare = AsyncComputed.create(this, async (use) => {
       const share = use(this._pageShare);
-      if (!share) { return null; }
+      if (!share || this._encryption) { return null; }
       try {
         const remoteShare = await this.gristDoc.docComm.getShare(use(share.linkId));
         return remoteShare ?? null;
@@ -390,6 +390,11 @@ export class FormView extends BaseView {
     this._published = Computed.create(this, (use) => {
       const isFork = use(this._isFork);
       if (isFork) { return false; }
+      // Forms of encrypted documents are published differently (see EncryptedForms.ts).
+      if (this._encryption) {
+        return Boolean(use(this.viewSection.shareOptionsObj.prop("publish")) &&
+          use(this.viewSection.shareOptionsObj.prop("encryptedForm" as any)));
+      }
 
       const pageShare = use(this._pageShare);
       const remoteShare = use(this._remoteShare) || use(this._remoteShare.dirty);
@@ -529,7 +534,17 @@ fields, such as reference and choice columns.",
     }
   }
 
+  // For encrypted documents, forms are published by the browser (see EncryptedForms.ts).
+  private get _encryption() {
+    return this.gristDoc.docComm.encryption;
+  }
+
   private async _publishForm() {
+    if (this._encryption) {
+      await this.save();
+      await this._encryption.publishForm(this.viewSection.id());
+      return;
+    }
     const page = this.viewSection.view().page();
     if (!page) {
       throw new Error("Unable to publish form: undefined page");
@@ -620,6 +635,10 @@ your form via that link will see an error.",
         docIdDigest: this.gristDoc.docId(),
       },
     });
+    if (this._encryption) {
+      await this._encryption.unpublishForm(this.viewSection.id());
+      return;
+    }
 
     await this.gristDoc.docModel.docData.bundleActions("Unpublish form", async () => {
       this.viewSection.shareOptionsObj.update({
@@ -680,7 +699,8 @@ your form via that link will see an error.",
               }),
             );
           } else {
-            return style.cssSmallLinkButton(
+            // (Previews are served by the server, which can't read encrypted documents.)
+            return this._encryption ? null : style.cssSmallLinkButton(
               testId("preview"),
               icon("EyeShow"),
               t("Preview"),
@@ -737,6 +757,11 @@ your form via that link will see an error.",
   }
 
   private async _getFormUrl() {
+    if (this._encryption) {
+      const url = this._encryption.getFormUrl(this.viewSection.id());
+      if (!url) { throw new Error("Unable to get form link: form is not published"); }
+      return url;
+    }
     const share = this._pageShare.get();
     if (!share) {
       throw new Error("Unable to get form link: form is not published");

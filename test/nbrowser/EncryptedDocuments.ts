@@ -213,12 +213,13 @@ describe("EncryptedDocuments", function() {
     it("hides what the server can't do for encrypted documents", async function() {
       // No access rules, nor automations (they would need the server to read the data).
       assert.isFalse(await driver.find(".test-tools-access-rules").isPresent());
-      // Sharing: no copies nor server-side downloads, but exports from the browser.
+      // Sharing: no server-side copies nor downloads, but copies and exports made by the browser.
       await driver.find(".test-tb-share").click();
       const menu = await driver.findWait(".grist-floating-menu", 2000).getText();
-      for (const option of ["Duplicate document", "Work on a copy", "Download document"]) {
+      for (const option of ["Work on a copy", "Download document"]) {
         assert.notInclude(menu, option);
       }
+      assert.include(menu, "Duplicate document");
       assert.include(menu, "Export as...");
       await driver.sendKeys(Key.ESCAPE);
       // Public access can't be turned on.
@@ -412,6 +413,242 @@ describe("EncryptedDocuments", function() {
           ["Anna", "52100", "52800", "Ben", "70000", "70900"]);
       }, 10000);
       assert.include(await readableWithDocKeys(docId), "70000");
+    });
+  });
+
+  describe("whole documents", function() {
+    let docId: string;
+    let copyId: string;
+
+    /** Waits for the page to reload and show the document (encrypted or not) with the given values in column A. */
+    async function waitForValues(values: string[]) {
+      await gu.waitToPass(async () => {
+        await gu.openPage("Table1");
+        assert.deepEqual(await gu.getVisibleGridCells({
+          section: "TABLE1", cols: ["A"], rowNums: values.map((_, i) => i + 1),
+        }), values);
+      }, ENGINE_LOAD_MS);
+    }
+
+    before(async function() {
+      // (Earlier tests signed in other members: sign in again, for real.)
+      owner = await gu.session().user("user1").teamSite.login({});
+      const ws = (await ownerApi.getOrgWorkspaces("current"))[0].id;
+      docId = await ownerApi.newDoc({ name: "To encrypt" }, ws);
+      cleanup.addAfterAll(() => ownerApi.deleteDoc(docId));
+      await ownerApi.getDocAPI(docId).addRows("Table1", { A: ["alpha", "beta"], B: ["secret1", "secret2"] });
+      // An access rule hides B from a member.
+      const member = gu.translateUser("user3");
+      await ownerApi.updateDocPermissions(docId, { users: { [member.email]: "viewers" } });
+      await ownerApi.getDocAPI(docId).applyUserActions([
+        ["AddRecord", "_grist_ACLResources", -1, { tableId: "Table1", colIds: "B" }],
+        ["AddRecord", "_grist_ACLRules", null, { resource: -1, rulePos: 1,
+          aclFormula: `user.Email == '${member.email}'`, permissionsText: "-R" }],
+      ]);
+    });
+
+    it("encrypts a regular document, from its settings", async function() {
+      await owner.loadDoc(`/doc/${docId}`);
+      await driver.find(".test-tools-settings").click();
+      await driver.findWait(".test-encryption-encrypt", 5000).click();
+      await driver.findWait(".test-modal-confirm", 2000).click();
+      // Once done, it says what became of the access rule.
+      await driver.findContentWait(".test-modal-dialog", /1 column\(s\) hidden by access rules are now private/, 30000);
+      assert.deepEqual((await ownerApi.getDoc(docId)).options?.encryption, { version: 1 });
+      await driver.find(".test-encryption-summary-ok").click();
+      await gu.waitToPass(async () => {
+        assert.isTrue(await driver.find(".test-encrypted-tag").isDisplayed());
+      }, ENGINE_LOAD_MS);
+      await waitForValues(["alpha", "beta"]);
+      assert.notInclude(await allStoredText(docId), "alpha");
+      await assert.isRejected(ownerApi.getDocAPI(docId).getRows("Table1"), /end-to-end encrypted/);
+      // The column hidden by the rule is private, sealed even under the document key.
+      assert.isTrue(await gu.getColumnHeader({ col: "B" }).find(".test-column-private-marker").isPresent());
+      assert.deepEqual(await gu.getVisibleGridCells({ section: "TABLE1", cols: ["B"], rowNums: [1, 2] }),
+        ["secret1", "secret2"]);
+      assert.notInclude(await readableWithDocKeys(docId), "secret1");
+    });
+
+    it("duplicates an encrypted document, in the browser", async function() {
+      await driver.find(".test-tb-share").click();
+      await driver.findWait(".test-encrypted-copy", 2000).click();
+      const name = await driver.findWait(".test-encrypted-copy-name", 2000);
+      await name.doClear();
+      await name.sendKeys("Encrypted copy");
+      await driver.find(".test-modal-confirm").click();
+      await gu.waitToPass(async () => {
+        const id = (await ownerApi.getDoc((await gu.getCurrentUrlId())!)).id;
+        assert.notEqual(id, docId);
+        copyId = id;
+      }, 30000);
+      cleanup.addAfterAll(() => ownerApi.deleteDoc(copyId));
+      await waitForValues(["alpha", "beta"]);
+      // Private columns stay private.
+      assert.isTrue(await gu.getColumnHeader({ col: "B" }).find(".test-column-private-marker").isPresent());
+      assert.deepEqual(await gu.getVisibleGridCells({ section: "TABLE1", cols: ["B"], rowNums: [1, 2] }),
+        ["secret1", "secret2"]);
+      assert.notInclude(await readableWithDocKeys(copyId), "secret1");
+      const copy = await ownerApi.getDoc(copyId);
+      assert.equal(copy.name, "Encrypted copy");
+      assert.deepEqual(copy.options?.encryption, { version: 1 });
+      assert.notInclude(await allStoredText(copyId), "alpha");
+    });
+
+    it("restores earlier versions", async function() {
+      await owner.loadDoc(`/doc/${docId}`, { wait: false });
+      await gu.waitForDocToLoad(ENGINE_LOAD_MS);
+      await gu.openPage("Table1");
+      await gu.getCell({ col: "A", rowNum: 1 }).click();
+      await gu.enterCell("gamma");
+      await gu.waitForServer();
+      // Replacing keys saves a version under the new keys.
+      await driver.find(".test-tools-settings").click();
+      for (const close of await driver.findAll(".test-notifier-toast-close")) { await close.click(); }
+      await driver.findWait(".test-encryption-rotate", 5000).click();
+      await driver.findContentWait(".test-notifier-toast-wrapper", /Keys replaced/, 10000);
+      await gu.openPage("Table1");
+      await gu.getCell({ col: "A", rowNum: 1 }).click();
+      await gu.enterCell("delta");
+      await gu.waitForServer();
+
+      await driver.find(".test-tools-log").click();
+      await driver.findContentWait(".test-doc-history-tabs .test-select-button", /Snapshots/, 2000).click();
+      await gu.waitToPass(async () => {
+        assert.lengthOf(await driver.findAll(".test-encrypted-snapshot"), 2);
+      }, 5000);
+      // The oldest one is the encrypted document as first saved.
+      const snapshots = await driver.findAll(".test-encrypted-snapshot");
+      await snapshots[1].find(".test-encrypted-snapshot-restore").click();
+      await driver.findWait(".test-modal-confirm", 2000).click();
+      await waitForValues(["alpha", "beta"]);
+    });
+
+    it("takes answers to forms, encrypted for the document's members", async function() {
+      await gu.addNewSection("Form", "Table1");
+      await driver.findWait(".test-forms-publish", 5000).click();
+      if (await driver.find(".test-modal-confirm").isPresent()) {
+        await driver.find(".test-modal-confirm").click();
+      }
+      await gu.waitForServer();
+      const shareButton = await driver.findWait(".test-forms-share", 5000);
+      await gu.scrollIntoView(shareButton);
+      await shareButton.click();
+      const formUrl = await driver.findWait(".test-forms-link", 5000).getAttribute("value");
+      assert.match(formUrl, /\/forms\/encrypted\.[A-Za-z0-9]+\.[0-9a-f]{32}\/\d+#[\w-]+$/);
+      await gu.sendKeys(Key.ESCAPE);
+      // Without the key in its link (or with another one), the form can't be read.
+      for (const brokenUrl of [formUrl.split("#")[0], formUrl.replace(/#.*/, "#" + "A".repeat(43))]) {
+        await gu.onNewTab(async () => {
+          await driver.get(brokenUrl);
+          await driver.findWait(".test-form-error-page-text", 10000);
+          assert.isFalse(await driver.find('input[name="A"]').isPresent());
+        });
+      }
+      await gu.onNewTab(async () => {
+        await driver.get(formUrl);
+        await driver.findWait('input[name="A"]', 10000).click();
+        await gu.sendKeys("from the form");
+        await driver.find('button[type="submit"]').click();
+        await driver.findWait(".test-form-success-page", 10000);
+      });
+      // The owner's browser, which has the document open, adds the answer.
+      await gu.waitToPass(async () => {
+        assert.deepEqual(await gu.getVisibleGridCells({ section: "TABLE1", cols: ["A"], rowNums: [1, 2, 3] }),
+          ["alpha", "beta", "from the form"]);
+      }, 20000);
+      assert.notInclude(await allStoredText(docId), "from the form");
+    });
+
+    it("makes an encrypted document regular again", async function() {
+      await driver.find(".test-tools-settings").click();
+      for (const close of await driver.findAll(".test-notifier-toast-close")) { await close.click(); }
+      await driver.findWait(".test-encryption-decrypt", 5000).click();
+      await driver.findWait(".test-modal-confirm", 2000).click();
+      await gu.waitToPass(async () => {
+        assert.isNull((await ownerApi.getDoc(docId)).options?.encryption ?? null);
+      }, 30000);
+      assert.deepEqual((await ownerApi.getDocAPI(docId).getRows("Table1")).A, ["alpha", "beta", "from the form"]);
+      // It reopens as a regular document.
+      await gu.waitToPass(async () => {
+        assert.isTrue(await driver.find(".test-encryption-encrypt").isDisplayed());
+      }, 20000);
+      assert.isFalse(await driver.find(".test-encrypted-tag").isPresent());
+    });
+  });
+
+  describe("suggestions", function() {
+    let docId: string;
+    const viewer = gu.translateUser("user3");
+    let ownerWindow: string;
+    let viewerWindow: string;
+
+    before(async function() {
+      const ws = (await ownerApi.getOrgWorkspaces("current"))[0].id;
+      owner = await gu.session().user("user1").teamSite.login({});
+      docId = await ownerApi.newDoc({ name: "Suggest", options: { encryption: { version: 1 } } }, ws);
+      cleanup.addAfterAll(() => ownerApi.deleteDoc(docId));
+      await ownerApi.updateDocPermissions(docId, { users: { [viewer.email]: "viewers" } });
+      await ownerApi.updateDoc(docId, { options: { proposedChanges: { acceptProposals: true } } });
+      ownerWindow = await driver.getWindowHandle();
+      await owner.loadDoc(`/doc/${docId}`, { wait: false });
+      await gu.waitForDocToLoad(ENGINE_LOAD_MS);
+      await gu.sendActions([["BulkAddRecord", "Table1", [null], { A: ["draft"] }]]);
+      // The viewer gets the document's key.
+      await driver.find(".test-tools-settings").click();
+      await driver.findWait(".test-encryption-grant", 5000);
+      await driver.switchTo().newWindow("tab");
+      viewerWindow = await driver.getWindowHandle();
+      const session = await gu.session().user("user3").teamSite.addLogin();
+      await session.loadDoc(`/doc/${docId}`, { wait: false });
+      await driver.findContentWait(".test-modal-dialog", /Waiting for access/, ENGINE_LOAD_MS);
+      await driver.switchTo().window(ownerWindow);
+      await driver.find(".test-encryption-grant").click();
+      await driver.findContentWait(".test-notifier-toast-wrapper", /Gave access/, 10000);
+      await driver.switchTo().window(viewerWindow);
+      await gu.waitForDocToLoad(ENGINE_LOAD_MS);
+    });
+
+    after(async function() {
+      if (viewerWindow) {
+        await driver.switchTo().window(viewerWindow);
+        await driver.close();
+      }
+      await driver.switchTo().window(ownerWindow);
+    });
+
+    it("lets viewers suggest changes, which owners apply", async function() {
+      // The viewer edits: it's a suggestion, made in their browser only.
+      await gu.getCell({ col: "A", rowNum: 1 }).click();
+      await gu.enterCell("final");
+      await gu.waitForServer();
+      assert.equal(await gu.getCell({ col: "A", rowNum: 1 }).getText(), "final");
+      await driver.switchTo().window(ownerWindow);
+      await gu.openPage("Table1");
+      assert.equal(await gu.getCell({ col: "A", rowNum: 1 }).getText(), "draft");
+
+      await driver.switchTo().window(viewerWindow);
+      await driver.findContent(".test-tb-share-action", /Send suggestion/).click();
+      await driver.findWait(".test-suggestion-desc", 2000).sendKeys("Ready");
+      await driver.find(".test-modal-confirm").click();
+      await gu.waitToPass(async () => {
+        assert.equal(await gu.getCell({ col: "A", rowNum: 1 }).getText(), "draft");
+      });
+
+      await driver.switchTo().window(ownerWindow);
+      await driver.find(".test-tools-encrypted-suggestions").click();
+      await driver.findContentWait(".test-suggestion", /Ready/, 5000);
+      await driver.find(".test-suggestion-apply").click();
+      await gu.waitForServer();
+      await gu.waitToPass(async () => {
+        assert.isFalse(await driver.find(".test-suggestion").isPresent());
+      });
+      await gu.sendKeys(Key.ESCAPE);
+      assert.equal(await gu.getCell({ col: "A", rowNum: 1 }).getText(), "final");
+      await driver.switchTo().window(viewerWindow);
+      await gu.waitToPass(async () => {
+        assert.equal(await gu.getCell({ col: "A", rowNum: 1 }).getText(), "final");
+      }, 10000);
+      await driver.switchTo().window(ownerWindow);
     });
   });
 });

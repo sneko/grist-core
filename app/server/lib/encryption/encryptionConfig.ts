@@ -12,17 +12,22 @@
  *    widgets served by Grist itself.
  *  - GRIST_ENCRYPTION_MAX_DOC_SIZE_MB: the most an encrypted document (its history, snapshots
  *    and attachments, all encrypted) may take on the server, when the site's plan sets no limit.
+ *  - GRIST_ENCRYPTION_ASSISTANT: an AI service for the formula assistant of encrypted documents,
+ *    which browsers call directly (with each user's consent), as JSON (see
+ *    EncryptionAssistantConfig), e.g. {"endpoint": "https://albert.api.etalab.gouv.fr/v1/chat/completions",
+ *    "model": "albert-large", "provider": "Albert (DINUM)", "sovereign": true, "auth": "user-key"}.
  *
  * The configuration is checked when the server starts (see FlexServer), so that a mistake is
  * reported then, rather than on each page.
  */
-import { EncryptionClientConfig } from "app/common/gristUrls";
+import { EncryptionAssistantConfig, EncryptionClientConfig } from "app/common/gristUrls";
 import { appSettings } from "app/server/lib/AppSettings";
 import log from "app/server/lib/log";
 
 const ENV_VARS = [
   "GRIST_ENCRYPTION_FEATURE_ENABLED", "GRIST_ENCRYPTION_VAULT_URL", "GRIST_ENCRYPTION_INTERFACE_URL",
-  "GRIST_ENCRYPTION_MOCK_VAULT", "GRIST_ENCRYPTION_MOCK_KEY", "GRIST_ENCRYPTION_ALLOWED_WIDGETS", "NODE_ENV",
+  "GRIST_ENCRYPTION_MOCK_VAULT", "GRIST_ENCRYPTION_MOCK_KEY", "GRIST_ENCRYPTION_ALLOWED_WIDGETS",
+  "GRIST_ENCRYPTION_ASSISTANT", "NODE_ENV",
 ];
 
 let _cached: { key: string, result: EncryptionClientConfig | undefined } | undefined;
@@ -68,7 +73,11 @@ function readEncryptionConfig(): EncryptionClientConfig | undefined {
         `e.g. "https://widgets.example.com/"`);
     }
   }
-  const common = allowedWidgets.length > 0 ? { allowedWidgets } : {};
+  const assistant = readAssistantConfig(section.flag("assistant").readString({ envVar: "GRIST_ENCRYPTION_ASSISTANT" }));
+  const common = {
+    ...(allowedWidgets.length > 0 ? { allowedWidgets } : {}),
+    ...(assistant ? { assistant } : {}),
+  };
   const mock = section.flag("mockVault").readBool({ envVar: "GRIST_ENCRYPTION_MOCK_VAULT", defaultValue: false });
   const vaultUrl = section.flag("vaultUrl").readString({ envVar: "GRIST_ENCRYPTION_VAULT_URL" });
   const interfaceUrl = section.flag("interfaceUrl").readString({ envVar: "GRIST_ENCRYPTION_INTERFACE_URL" });
@@ -92,4 +101,29 @@ function readEncryptionConfig(): EncryptionClientConfig | undefined {
       "GRIST_ENCRYPTION_INTERFACE_URL (or GRIST_ENCRYPTION_MOCK_VAULT for testing)");
   }
   return { vaultUrl, interfaceUrl, ...common };
+}
+
+function readAssistantConfig(setting: string | undefined): EncryptionAssistantConfig | undefined {
+  if (!setting) { return undefined; }
+  const fail = (why: string) => {
+    throw new Error(`GRIST_ENCRYPTION_ASSISTANT: ${why} (expected JSON like {"endpoint": "https://...", ` +
+      `"model": "...", "provider": "...", "sovereign": true, "auth": "user-key"})`);
+  };
+  let value: any;
+  try {
+    value = JSON.parse(setting);
+  } catch (e) {
+    return fail("invalid JSON");
+  }
+  if (typeof value?.endpoint !== "string" || !/^https:\/\/[^/]+\//.test(value.endpoint)) {
+    fail("endpoint must be an https URL");
+  }
+  if (typeof value.provider !== "string" || !value.provider) { fail("provider must say who runs the service"); }
+  if (typeof value.sovereign !== "boolean") { fail("sovereign must be true or false"); }
+  if (value.auth !== "user-key" && value.auth !== "none") { fail(`auth must be "user-key" or "none"`); }
+  if (value.model !== undefined && typeof value.model !== "string") { fail("model must be a string"); }
+  return {
+    endpoint: value.endpoint, provider: value.provider, sovereign: value.sovereign, auth: value.auth,
+    ...(value.model ? { model: value.model } : {}),
+  };
 }

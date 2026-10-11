@@ -23,6 +23,7 @@ import { DocAuthorizer, DocAuthorizerImpl, DummyAuthorizer } from "app/server/li
 import { DocSessionPrecursor,
   makeExceptionalDocSession, makeOptDocSession, OptDocSession } from "app/server/lib/DocSession";
 import * as docUtils from "app/server/lib/docUtils";
+import { assertDocUnlocked } from "app/server/lib/encryption/docLocks";
 import { GristServer } from "app/server/lib/GristServer";
 import { IDocStorageManager } from "app/server/lib/IDocStorageManager";
 import { makeForkIds, makeId } from "app/server/lib/idUtils";
@@ -504,6 +505,8 @@ export class DocManager extends EventEmitter implements IMemoryLoadEstimator {
   public async fetchDoc(docSession: OptDocSession, docName: string,
     wantRecoveryMode?: boolean): Promise<ActiveDoc> {
     log.debug("DocManager.fetchDoc", docName);
+    // Documents being converted to encryption can't be opened meanwhile (see docLocks.ts).
+    assertDocUnlocked(docName, docSession);
     return this._withUnmutedDoc(docSession, docName, async () => {
       const activeDoc = await this._fetchPossiblyMutedDoc(docSession, docName, wantRecoveryMode);
       return { activeDoc, result: activeDoc };

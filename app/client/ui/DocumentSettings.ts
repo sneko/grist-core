@@ -4,7 +4,7 @@
  */
 import { cssPrimarySmallLink, cssSmallButton, cssSmallLinkButton } from "app/client/components/Forms/styles";
 import { GristDoc } from "app/client/components/GristDoc";
-import { buildEncryptionSettings } from "app/client/encryption/EncryptionUI";
+import { buildEncryptDocumentSection, buildEncryptionSettings } from "app/client/encryption/EncryptionUI";
 import { ACIndexImpl } from "app/client/lib/ACIndex";
 import { ACSelectItem, buildACSelect } from "app/client/lib/ACSelect";
 import { copyToClipboard } from "app/client/lib/clipboardUtils";
@@ -34,6 +34,7 @@ import { commonUrls, GristLoadConfig, PREFERRED_STORAGE_ANCHOR } from "app/commo
 import { not, propertyCompare } from "app/common/gutil";
 import { getCurrency, locales } from "app/common/Locales";
 import { isOwner, isOwnerOrEditor } from "app/common/roles";
+import { getGristConfig } from "app/common/urlUtils";
 import {
   DOCTYPE_NORMAL,
   DOCTYPE_TEMPLATE,
@@ -125,7 +126,7 @@ export class DocSettingsPage extends Disposable {
           ),
           disabled: isDocOwner ? false : t("Only available to document owners"),
         }),
-        (!isFork && !isEncrypted) ? SectionItem({
+        !isFork ? SectionItem({
           id: "acceptProposals",
           name: [t("Suggestions"), betaTag(t("experiment"), { style: "margin-left: 4px;" })],
           description: withInfoTooltip(
@@ -162,6 +163,8 @@ export class DocSettingsPage extends Disposable {
 
       isEncrypted ? SectionCard(t("Encryption"), [
         dom.create(buildEncryptionSettings, this._gristDoc),
+      ]) : (isDocOwner && !isFork && getGristConfig().encryption) ? SectionCard(t("Encryption"), [
+        dom.create(buildEncryptDocumentSection, this._gristDoc),
       ]) : null,
 
       // (For encrypted documents, notifications can only say that the document changed, and who

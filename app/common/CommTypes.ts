@@ -2,7 +2,9 @@ import { ActionGroup } from "app/common/ActionGroup";
 import { VisibleUserProfile } from "app/common/ActiveDocAPI";
 import { DocAction } from "app/common/DocActions";
 import { FilteredDocUsageSummary } from "app/common/DocUsage";
-import { EncryptedActionMessage, EncryptedKeysMessage } from "app/common/encryption/EncryptionTypes";
+import {
+  EncryptedActionMessage, EncryptedKeysMessage, EncryptedLockMessage,
+} from "app/common/encryption/EncryptionTypes";
 import { Product } from "app/common/Features";
 import { StringUnion } from "app/common/StringUnion";
 import { AttachmentTransferStatus } from "app/common/UserAPI";
@@ -10,7 +12,7 @@ import { AttachmentTransferStatus } from "app/common/UserAPI";
 export const ValidEvent = StringUnion(
   "docListAction", "docUserAction", "docShutdown", "docError",
   "docUsage", "docChatter", "docUserPresenceUpdate", "clientConnect",
-  "encryptedDocAction", "encryptedDocKeys");
+  "encryptedDocAction", "encryptedDocKeys", "encryptedDocLock", "encryptedDocSuggestions", "encryptedDocInbox");
 export type ValidEvent = typeof ValidEvent.type;
 
 /**
@@ -66,7 +68,8 @@ export type CommDocEventType = CommDocMessage["type"];
  * Events for end-to-end encrypted documents, which browsers open through openEncryptedDoc rather than
  * openDoc (see app/server/lib/encryption/EncryptionRelay.ts). They are identified by docId, not docFD.
  */
-export type CommEncryptionMessage = CommEncryptedDocAction | CommEncryptedDocKeys;
+export type CommEncryptionMessage = CommEncryptedDocAction | CommEncryptedDocKeys | CommEncryptedDocLock |
+  CommEncryptedDocSuggestions | CommEncryptedDocInbox;
 
 /** A change to an encrypted document, made by another browser. */
 export interface CommEncryptedDocAction extends CommMessageBase {
@@ -77,6 +80,24 @@ export interface CommEncryptedDocAction extends CommMessageBase {
 /** Copies of an encrypted document's key were added. */
 export interface CommEncryptedDocKeys extends CommMessageBase {
   type: "encryptedDocKeys";
+  data: EncryptedKeysMessage;
+}
+
+/** An encrypted document got locked or unlocked by a member, or stopped being encrypted. */
+export interface CommEncryptedDocLock extends CommMessageBase {
+  type: "encryptedDocLock";
+  data: EncryptedLockMessage;
+}
+
+/** Suggestions of changes to an encrypted document were added or handled. */
+export interface CommEncryptedDocSuggestions extends CommMessageBase {
+  type: "encryptedDocSuggestions";
+  data: EncryptedKeysMessage;
+}
+
+/** Answers to forms of an encrypted document arrived. */
+export interface CommEncryptedDocInbox extends CommMessageBase {
+  type: "encryptedDocInbox";
   data: EncryptedKeysMessage;
 }
 

@@ -440,7 +440,12 @@
         "You do not have edit access to this document": "You do not have edit access to this document",
         "Please reload the document and if the error persist, contact the document owners to attempt a document recovery. [{{error}}]": "Please reload the document and if the error persist, contact the document owners to attempt a document recovery. [{{error}}]",
         "Import from {{importSource}}": "Import from {{importSource}}",
-        "Import from...": "Import from..."
+        "Import from...": "Import from...",
+        "Cancel": "Cancel",
+        "End-to-end encrypted documents are not enabled on this server": "End-to-end encrypted documents are not enabled on this server",
+        "Import": "Import",
+        "Import from Google Drive": "Import from Google Drive",
+        "Import from file": "Import from file"
     },
     "DocTour": {
         "Cannot construct a document tour from the data in this document. Ensure there is a table named GristDocTour with columns Title, Body, Placement, and Location.": "Cannot construct a document tour from the data in this document. Ensure there is a table named GristDocTour with columns Title, Body, Placement, and Location.",
@@ -542,7 +547,8 @@
         "Enable suggestions": "Enable suggestions",
         "Suggestions": "Suggestions",
         "experiment": "experiment",
-        "For number formats": "For number formats"
+        "For number formats": "For number formats",
+        "Encryption": "Encryption"
     },
     "DocumentUsage": {
         "Size of attachments": "Size of attachments",
@@ -764,7 +770,8 @@
         "Import from Airtable": "Import from Airtable",
         "Airtable": "Airtable",
         "Import from {{importSource}}": "Import from {{importSource}}",
-        "Import from...": "Import from..."
+        "Import from...": "Import from...",
+        "Create encrypted document": "Create encrypted document"
     },
     "Importer": {
         "Merge rows that match these fields:": "Merge rows that match these fields:",
@@ -1003,7 +1010,11 @@
         "Download document...": "Download document...",
         "Suggest changes": "Suggest changes",
         "current version": "current version",
-        "original": "original"
+        "original": "original",
+        "Discard my changes": "Discard my changes",
+        "My suggestions waiting": "My suggestions waiting",
+        "Only members who can read all of the document can copy it": "Only members who can read all of the document can copy it",
+        "Send suggestion": "Send suggestion"
     },
     "SiteSwitcher": {
         "Create new team site": "Create new team site",
@@ -1129,7 +1140,8 @@
         "Add to page": "Add to page",
         "Collapse widget": "Collapse widget",
         "Create a form": "Create a form",
-        "Duplicate widget": "Duplicate widget"
+        "Duplicate widget": "Duplicate widget",
+        "Download as TSV": "Download as TSV"
     },
     "ViewSectionMenu": {
         "(customized)": "(customized)",
@@ -1173,7 +1185,9 @@
         "unsaved": "unsaved",
         "You may make edits,\nbut they will not affect the original document.\nYou can propose them as suggestions.": "You may make edits,\nbut they will not affect the original document.\nYou can propose them as suggestions.",
         "editing": "editing",
-        "suggesting": "suggesting"
+        "suggesting": "suggesting",
+        "INSECURE (mock)": "INSECURE (mock)",
+        "encrypted": "encrypted"
     },
     "duplicatePage": {
         "Duplicate page {{pageName}}": "Duplicate page {{pageName}}",
@@ -1375,7 +1389,8 @@
         "Common": "Common",
         "Separate": "Separate",
         "Field in {{count}} views_one": "Field in one view",
-        "Field in {{count}} views_other": "Field in {{count}} views"
+        "Field in {{count}} views_other": "Field in {{count}} views",
+        "You don't have access to this private column": "You don't have access to this private column"
     },
     "FieldEditor": {
         "It should be impossible to save a plain data value into a formula column": "It should be impossible to save a plain data value into a formula column",
@@ -1854,7 +1869,8 @@
         "Some required columns aren't mapped": "Some required columns aren't mapped",
         "To use this widget, please map all non-optional columns from the creator panel on the right.": "To use this widget, please map all non-optional columns from the creator panel on the right.",
         "Some required columns are hidden by access rules": "Some required columns are hidden by access rules",
-        "To use this widget, all mapped columns must be visible. Please contact document owner or modify access rules.": "To use this widget, all mapped columns must be visible. Please contact document owner or modify access rules."
+        "To use this widget, all mapped columns must be visible. Please contact document owner or modify access rules.": "To use this widget, all mapped columns must be visible. Please contact document owner or modify access rules.",
+        "This widget can't be used in end-to-end encrypted documents: it would see their content.": "This widget can't be used in end-to-end encrypted documents: it would see their content."
     },
     "FormContainer": {
         "Build your own form": "Build your own form",
@@ -2770,7 +2786,8 @@
         "Select widget": "Select widget"
     },
     "CoreNewDocMethods": {
-        "Untitled document": "Untitled document"
+        "Untitled document": "Untitled document",
+        "Untitled encrypted document": "Untitled encrypted document"
     },
     "AuthenticationSection": {
         "Active": "Active",
@@ -3604,7 +3621,8 @@
     "HomeNewDocBlock": {
         "Blank document": "Blank document",
         "Import file": "Import file",
-        "Templates": "Templates"
+        "Templates": "Templates",
+        "Encrypted document": "Encrypted document"
     },
     "startDocGristImport": {
         "Copy data from another document": "Copy data from another document"
@@ -3612,5 +3630,124 @@
     "startHomeGristImport": {
         "Copy data from another document": "Copy data from another document",
         "Data can't be copied to the current workspace.": "Data can't be copied to the current workspace."
+    },
+    "EncryptedDocSession": {
+        "A change by another member contained invalid private values, which are shown as locked.": "A change by another member contained invalid private values, which are shown as locked.",
+        "A change by another member couldn't be applied, and was ignored.": "A change by another member couldn't be applied, and was ignored.",
+        "An earlier version of this document was restored: it needs reloading.": "An earlier version of this document was restored: it needs reloading.",
+        "Attachment not found": "Attachment not found",
+        "Cancel": "Cancel",
+        "Continue": "Continue",
+        "Enable encryption": "Enable encryption",
+        "Encryption keys are required to open this document": "Encryption keys are required to open this document",
+        "Give access": "Give access",
+        "No access to the key of this encrypted document": "No access to the key of this encrypted document",
+        "Reload": "Reload",
+        "Reload needed": "Reload needed",
+        "The AI assistant is not available for end-to-end encrypted documents": "The AI assistant is not available for end-to-end encrypted documents",
+        "The encryption service did not create a key for you": "The encryption service did not create a key for you",
+        "This document is encrypted, and its owner hasn't set it up yet. It will open as soon as they do.": "This document is encrypted, and its owner hasn't set it up yet. It will open as soon as they do.",
+        "This document is encrypted. You must enable encryption on your account to access it.": "This document is encrypted. You must enable encryption on your account to access it.",
+        "This is not a link to a Google Drive file": "This is not a link to a Google Drive file",
+        "This is not available for end-to-end encrypted documents": "This is not available for end-to-end encrypted documents",
+        "Waiting for access": "Waiting for access",
+        "Your account is not known to the encryption service": "Your account is not known to the encryption service",
+        "{{count}} member(s) can't read this encrypted document yet._one": "{{count}} member(s) can't read this encrypted document yet.",
+        "{{count}} member(s) can't read this encrypted document yet._other": "{{count}} member(s) can't read this encrypted document yet.",
+        "Only members who can read the columns this form fills can publish it": "Only members who can read the columns this form fills can publish it"
+    },
+    "EncryptionUI": {
+        "A member": "A member",
+        "All members of the document can read this column.": "All members of the document can read this column.",
+        "Apply": "Apply",
+        "As template (structure only, without data)": "As template (structure only, without data)",
+        "Can read": "Can read",
+        "Change who can read it": "Change who can read it",
+        "Close": "Close",
+        "Converting attachments…": "Converting attachments…",
+        "Copying the document": "Copying the document",
+        "Discard": "Discard",
+        "Discard your changes?": "Discard your changes?",
+        "Dismiss": "Dismiss",
+        "Done": "Done",
+        "Duplicate": "Duplicate",
+        "Duplicate document": "Duplicate document",
+        "Encrypt": "Encrypt",
+        "Encrypt this document": "Encrypt this document",
+        "Encrypt this document end to end?": "Encrypt this document end to end?",
+        "Encrypting this document": "Encrypting this document",
+        "Gave access to {{count}} member(s)._one": "Gave access to {{count}} member(s).",
+        "Gave access to {{count}} member(s)._other": "Gave access to {{count}} member(s).",
+        "Give access to waiting members": "Give access to waiting members",
+        "Keys replaced.": "Keys replaced.",
+        "Loading…": "Loading…",
+        "Make private": "Make private",
+        "Make public": "Make public",
+        "Make this column private": "Make this column private",
+        "Make your changes first: they'll be sent as a suggestion.": "Make your changes first: they'll be sent as a suggestion.",
+        "Making this document a regular one": "Making this document a regular one",
+        "Name": "Name",
+        "PRIVACY": "PRIVACY",
+        "Preparing the content…": "Preparing the content…",
+        "Private column: only some members can read it.": "Private column: only some members can read it.",
+        "Private column: you don't have access to its values.": "Private column: you don't have access to its values.",
+        "Replace keys": "Replace keys",
+        "Restore": "Restore",
+        "Restore this version?": "Restore this version?",
+        "Save": "Save",
+        "Saved": "Saved",
+        "Saved by {{name}}": "Saved by {{name}}",
+        "Saving…": "Saving…",
+        "Send": "Send",
+        "Send your suggestion": "Send your suggestion",
+        "Starting…": "Starting…",
+        "Stop encrypting": "Stop encrypting",
+        "Stop encrypting this document": "Stop encrypting this document",
+        "Stop encrypting this document?": "Stop encrypting this document?",
+        "Suggestion sent.": "Suggestion sent.",
+        "Suggestions": "Suggestions",
+        "The changes you made (not sent as a suggestion yet) will be undone.": "The changes you made (not sent as a suggestion yet) will be undone.",
+        "There are no other members.": "There are no other members.",
+        "There are no suggestions waiting.": "There are no suggestions waiting.",
+        "This formula uses private columns: only members who can read them can see its results.": "This formula uses private columns: only members who can read them can see its results.",
+        "Versions of this document are saved regularly (encrypted): the most recent ones are kept.": "Versions of this document are saved regularly (encrypted): the most recent ones are kept.",
+        "Waiting for access": "Waiting for access",
+        "What do you suggest, and why? (optional)": "What do you suggest, and why? (optional)",
+        "Who can read this column": "Who can read this column",
+        "Withdraw": "Withdraw",
+        "latest": "latest",
+        "{{name}} (copy)": "{{name}} (copy)",
+        "Open it": "Open it",
+        "The document is encrypted": "The document is encrypted",
+        "{{count}} access rule(s) limiting edits were dropped._one": "{{count}} access rule(s) limiting edits were dropped.",
+        "{{count}} access rule(s) limiting edits were dropped._other": "{{count}} access rule(s) limiting edits were dropped.",
+        "{{count}} column(s) hidden by access rules are now private columns._one": "{{count}} column(s) hidden by access rules are now private columns.",
+        "{{count}} column(s) hidden by access rules are now private columns._other": "{{count}} column(s) hidden by access rules are now private columns."
+    },
+    "localAssistant": {
+        "API key": "API key",
+        "API key for {{provider}}": "API key for {{provider}}",
+        "Cancel": "Cancel",
+        "I agree": "I agree",
+        "It doesn't send the values in cells. The service is run by {{provider}}.": "It doesn't send the values in cells. The service is run by {{provider}}.",
+        "It's NOT a sovereign service: your data may be subject to foreign laws.": "It's NOT a sovereign service: your data may be subject to foreign laws.",
+        "It's a sovereign service.": "It's a sovereign service.",
+        "Save": "Save",
+        "Send this document's structure to an AI service?": "Send this document's structure to an AI service?",
+        "The AI assistant needs an API key": "The AI assistant needs an API key",
+        "The AI assistant needs your agreement to be used": "The AI assistant needs your agreement to be used",
+        "The AI service refused the request: check your API key": "The AI service refused the request: check your API key",
+        "The AI service returned an error ({{status}})": "The AI service returned an error ({{status}})",
+        "The AI service returned an error ({{status}}): {{message}}": "The AI service returned an error ({{status}}): {{message}}",
+        "The AI service returned an invalid answer": "The AI service returned an invalid answer",
+        "You'll be asked again in your next session.": "You'll be asked again in your next session.",
+        "what you ask the assistant.": "what you ask the assistant."
+    },
+    "lockOverlay": {
+        "A member": "A member",
+        "Please wait": "Please wait"
+    },
+    "sortUtil": {
+        "This order is based on private columns: saving it would reveal it to all members.": "This order is based on private columns: saving it would reveal it to all members."
     }
 }

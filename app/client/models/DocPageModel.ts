@@ -1,6 +1,7 @@
 import { GristDoc, GristDocImpl } from "app/client/components/GristDoc";
 import { IUndoState } from "app/client/components/UndoStack";
 import { UnsavedChange } from "app/client/components/UnsavedChanges";
+import { waitForUnlock } from "app/client/encryption/lockOverlay";
 import { loadEncryption, loadGristDoc } from "app/client/lib/imports";
 import { makeT } from "app/client/lib/localization";
 import { logTelemetryEvent } from "app/client/lib/telemetry";
@@ -10,23 +11,26 @@ import { getDoc } from "app/client/models/gristConfigCache";
 import { docUrl, urlState } from "app/client/models/gristUrlState";
 import { addNewButton, cssAddNewButton } from "app/client/ui/AddNewButton";
 import { App } from "app/client/ui/App";
+import { AUTH_INTERRUPTED, getGoogleCodeForReading } from "app/client/ui/googleAuth";
 import { buildDocGristImportMenuItem } from "app/client/ui/GristImportEntryPoints";
+import { textInput } from "app/client/ui/inputs";
 import { cssLeftPanel, cssScrollPane } from "app/client/ui/LeftPanelCommon";
 import { buildPagesDom } from "app/client/ui/Pages";
 import { openPageWidgetPicker } from "app/client/ui/PageWidgetPicker";
 import { tools } from "app/client/ui/Tools";
 import { createVersionFooter } from "app/client/ui/VersionFooter";
-import { bigBasicButton } from "app/client/ui2018/buttons";
+import { bigBasicButton, bigPrimaryButton } from "app/client/ui2018/buttons";
 import { testId } from "app/client/ui2018/cssVars";
 import { menu, menuDivider, menuIcon, menuItem, menuItemSubmenu, menuText } from "app/client/ui2018/menus";
-import { confirmModal } from "app/client/ui2018/modals";
+import { confirmModal, cssModalBody, cssModalButtons, cssModalTitle, modal } from "app/client/ui2018/modals";
+import { ApiError } from "app/common/ApiError";
 import { mapGetOrSet, MapWithTTL } from "app/common/AsyncCreate";
 import { AsyncFlow, CancelledError, FlowRunner } from "app/common/AsyncFlow";
 import { delay } from "app/common/delay";
 import { OpenDocMode, OpenDocOptions, OpenLocalDocResult, UserOverride } from "app/common/DocListAPI";
 import { createEmptyDocStateComparison } from "app/common/DocState";
 import { FilteredDocUsageSummary } from "app/common/DocUsage";
-import { isEncryptedDoc, LOCAL_IMPORT_EXTENSIONS } from "app/common/encryption/EncryptionTypes";
+import { DocLockInfo, isEncryptedDoc, LOCAL_IMPORT_EXTENSIONS } from "app/common/encryption/EncryptionTypes";
 import { Features, mergedFeatures, Product } from "app/common/Features";
 import {
   buildUrlId,
@@ -52,7 +56,9 @@ import {
   Workspace,
 } from "app/common/UserAPI";
 
-import { Computed, Disposable, dom, DomArg, DomContents, DomElementArg, Holder, Observable, subscribe } from "grainjs";
+import {
+  Computed, Disposable, dom, DomArg, DomContents, DomElementArg, Holder, MultiHolder, Observable, subscribe,
+} from "grainjs";
 import isEqual from "lodash/isEqual";
 
 const t = makeT("DocPageModel");
@@ -436,6 +442,13 @@ contact the document owners to attempt a document recovery. [{{error}}]", { erro
       console.log("DocPageModel _openDoc cancelled", err.cause ?? "");
       return;
     }
+    const docLock = (err as ApiError).details?.code === "DocLocked" && (err as ApiError).details?.docLock;
+    const docId = this.currentDocId.get();
+    if (docLock && docId) {
+      // Someone is changing the document as a whole (e.g. encrypting it): wait for them.
+      waitForUnlock(this._appObj.comm, docId, docLock as DocLockInfo);
+      return;
+    }
     // Expected errors (e.g. Access Denied) produce a separate error page. For unexpected errors,
     // show a modal, and include a toast for the sake of the "Report error" link.
     reportError(err);
@@ -509,8 +522,10 @@ contact the document owners to attempt a document recovery. [{{error}}]", { erro
       throw new Error(t("End-to-end encrypted documents are not enabled on this server"));
     }
     const encrypted = isEncryptedDoc(doc) ? await loadEncryption().then(m =>
-      m.EncryptedDocSession.open(comm, doc.id, encryptionConfig!,
-        { isCancelled: () => flow.isCancelled })) : null;
+      m.EncryptedDocSession.open(comm, doc.id, encryptionConfig!, {
+        isCancelled: () => flow.isCancelled,
+        canSuggest: Boolean(doc.options?.proposedChanges?.acceptProposals),
+      })) : null;
     // The flow owns the session until the DocComm takes it over.
     if (encrypted) { flow.autoDispose(encrypted.session); }
     const openDocResponse = encrypted ? encrypted.openResponse : await comm.openDoc(doc.id, {
@@ -612,11 +627,47 @@ function buildEncryptedImportMenuItem(gristDoc: GristDoc, isReadonly: boolean): 
     if (!files.length) { return; }
     await gristDoc.docComm.encryption!.importFiles(files);
   };
-  return menuItem(() => importFiles().catch(reportError),
-    menuIcon("Import"), t("Import from file"),
-    testId("dp-import-encrypted"),
-    dom.cls("disabled", isReadonly),
-  );
+  return [
+    menuItem(() => importFiles().catch(reportError),
+      menuIcon("Import"), t("Import from file"),
+      testId("dp-import-encrypted"),
+      dom.cls("disabled", isReadonly),
+    ),
+    getGristConfig().googleClientId ? menuItem(() => importFromGoogleDrive(gristDoc),
+      menuIcon("Import"), t("Import from Google Drive"),
+      testId("dp-import-encrypted-drive"),
+      dom.cls("disabled", isReadonly),
+    ) : null,
+  ];
+}
+
+// For encrypted documents, the file is downloaded and parsed by the browser (see driveImport.ts).
+function importFromGoogleDrive(gristDoc: GristDoc) {
+  modal((ctl, owner) => {
+    const url = Observable.create(owner, "");
+    const importNow = () => {
+      // (The authorization popup must open right away, on the click.)
+      const authOwner = new MultiHolder();
+      const code = getGoogleCodeForReading(authOwner);
+      ctl.close();
+      code.then(c => gristDoc.docComm.encryption!.importFromGoogleDrive(url.get(), c))
+        .catch((e) => { if (e?.message !== AUTH_INTERRUPTED) { reportError(e); } })
+        .finally(() => authOwner.dispose());
+    };
+    return [
+      cssModalTitle(t("Import from Google Drive")),
+      cssModalBody(
+        dom("p", t("Paste the link to a Google Drive file (e.g. a Google Sheet). It's downloaded by your " +
+          "browser, and stays encrypted.")),
+        textInput(url, { placeholder: "https://docs.google.com/spreadsheets/d/..." }, testId("dp-drive-url")),
+      ),
+      cssModalButtons(
+        bigPrimaryButton(t("Import"), dom.boolAttr("disabled", use => !use(url).trim()),
+          dom.on("click", importNow), testId("dp-drive-import")),
+        bigBasicButton(t("Cancel"), dom.on("click", () => ctl.close())),
+      ),
+    ];
+  });
 }
 
 function addMenu(importSources: ImportSource[], gristDoc: GristDoc, isReadonly: boolean): DomElementArg[] {
@@ -718,8 +769,10 @@ function buildDocInfo(doc: Document, mode: OpenDocMode | undefined): DocInfo {
   if (isEncryptedDoc(doc)) { openMode = "default"; }
   const isPreFork = openMode === "fork";
   const isTemplate = type === DOCTYPE_TEMPLATE && (isFork || isPreFork);
-  // A document can be held read-only whatever the access level, so check both.
-  const isEditable = !isSnapshot && ((canEdit(doc.access) && !doc.readOnlyReason) || isPreFork);
+  // A document can be held read-only whatever the access level, so check both. (Members who can
+  // suggest changes to an encrypted document make them in place, see LocalActiveDoc.)
+  const isEditable = !isSnapshot && ((canEdit(doc.access) && !doc.readOnlyReason) || isPreFork ||
+    (isEncryptedDoc(doc) && shouldSuggest));
   return {
     ...doc,
     isFork,

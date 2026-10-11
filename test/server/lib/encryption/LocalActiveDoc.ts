@@ -4,10 +4,15 @@
  * columns, key replacement, and attachments.
  */
 import { TableDataAction } from "app/common/DocActions";
+import { makeAccessRuleActions } from "app/common/encryption/AccessRulesFromPrivacy";
 import { EncryptionAccessError, isLockedCell, LOCKED_CELL } from "app/common/encryption/ColumnPrivacy";
 import {
   decryptFile, EncryptedFileRef, encryptFile, makeFileIdent, parseFileIdent,
 } from "app/common/encryption/EncryptedAttachments";
+import {
+  decryptFormFile, decryptFormSpec, EncryptedFormKeys, encryptFormAnswer, encryptFormFile, encryptFormSpec,
+  generateFormKeys,
+} from "app/common/encryption/EncryptedForms";
 import {
   decryptBundle, decryptSnapshot, DocChangeBundle, encryptBundle,
 } from "app/common/encryption/EncryptedPayloads";
@@ -15,6 +20,7 @@ import { base64ToBytes, bytesToBase64, MockKeyVault } from "app/common/encryptio
 import {
   DOC_SCOPE, EncryptedActionRecord, makeColumnScope, makeKeyId,
 } from "app/common/encryption/EncryptionTypes";
+import { buildFormSpec, FormAnswerHelpers, readFormAnswers } from "app/common/encryption/FormSpecs";
 import { fromKeyRecord, Keyring, MissingKeyError } from "app/common/encryption/Keyring";
 import { InvalidChange, LocalActiveDoc, LocalDocUserAction } from "app/common/encryption/LocalActiveDoc";
 import { addParsedTables, parseFileLocally } from "app/common/encryption/LocalImport";
@@ -45,7 +51,7 @@ describe("encryption/LocalActiveDoc", function() {
   }
 
   async function join(relay: MemoryRelay, member: MemoryMember, options: {
-    create?: boolean, snapshotEvery?: number,
+    create?: boolean, snapshotEvery?: number, canSuggest?: boolean,
   } = {}): Promise<Participant> {
     const client = relay.connect(member.userId);
     const received: LocalDocUserAction[] = [];
@@ -59,6 +65,7 @@ describe("encryption/LocalActiveDoc", function() {
         .toJSON(),
       userName: member.email,
       canEdit: member.access !== "viewers",
+      canSuggest: options.canSuggest,
       onDocUserAction: action => received.push(action),
       onInvalidChange: change => skipped.push(change),
       vaultIdFor,
@@ -1032,6 +1039,485 @@ describe("encryption/LocalActiveDoc", function() {
       const c2 = await join(relay, carol);
       assert.deepInclude((await tableValues(c2, "Staff"))[3], { Salary: [52100, 61300] });
       leave(relay, c2);
+    });
+  });
+
+  describe("sensitive changes", function() {
+    let relay: MemoryRelay;
+    let a: Participant;   // Owner.
+    let b: Participant;   // Can read the private column.
+    let c: Participant;   // Can't.
+    let salaryRef: number;
+
+    before(async function() {
+      relay = await newRelay(bob, carol);
+      a = await join(relay, alice, { create: true });
+      await giveKeys(relay, DOC_SCOPE, bob, carol);
+      await a.doc.applyUserActions([
+        ["AddTable", "Staff", [
+          { id: "Name", type: "Text", isFormula: false },
+          { id: "Salary", type: "Numeric", isFormula: false },
+        ]],
+        ["BulkAddRecord", "Staff", [null, null], { Name: ["Ana", "Ben"], Salary: [52100, 61300] }],
+      ]);
+      const cols = await tableValues(a, "_grist_Tables_column");
+      salaryRef = cols[2][cols[3].colId.indexOf("Salary")];
+      b = await join(relay, bob);
+      c = await join(relay, carol);
+    });
+
+    after(function() {
+      for (const p of [a, b, c]) { leave(relay, p); }
+    });
+
+    it("saves the document along with making a column private, dropping what was readable", async function() {
+      assert.include(await readableWithDocKey(relay), "61300");
+      const scope = makeColumnScope();
+      await a.doc.createScopeKey(scope, [alice, bob].map(m => ({ ...m, vaultUserId: vaultIdFor(m) })), salaryRef,
+        { compact: true });
+      // One step: the key change and the snapshot under it, with nothing else kept.
+      assert.equal(relay.keyChangeSnapshots, 1);
+      assert.deepEqual(relay.snapshots.map(snap => snap.actionNum), [relay.head]);
+      assert.deepEqual(relay.actions.filter(act => act.actionNum <= relay.head), []);
+      assert.notInclude(await readableWithDocKey(relay), "61300");
+      // Newcomers load it as such.
+      const b2 = await join(relay, bob);
+      const c2 = await join(relay, carol);
+      assert.deepEqual((await tableValues(b2, "Staff"))[3].Salary, [52100, 61300]);
+      assert.deepEqual((await tableValues(c2, "Staff"))[3].Salary, [LOCKED_CELL, LOCKED_CELL]);
+      leave(relay, b2);
+      leave(relay, c2);
+    });
+
+    it("saves the document along with replacing a key", async function() {
+      relay.revoke([carol.userId]);
+      await a.doc.refreshKeys();
+      await a.doc.applyUserActions([["UpdateRecord", "Staff", 1, { Name: "Anna" }]]);
+      assert.equal(relay.keyChangeSnapshots, 2);
+      const newKey = relay.currentKey(DOC_SCOPE)!;
+      const latest = relay.snapshots[relay.snapshots.length - 1];
+      assert.deepInclude(latest, { actionNum: newKey.actionNum, keyId: newKey.keyId });
+      // Bob, given only the new key, opens it.
+      const b2 = await join(relay, bob);
+      assert.deepEqual((await tableValues(b2, "Staff"))[3].Name, ["Anna", "Ben"]);
+      leave(relay, b2);
+      await b.doc.sync();
+    });
+
+    it("lets owners restore an earlier version, which every browser reloads", async function() {
+      await a.doc.saveSnapshot();
+      const earlier = relay.head;
+      await a.doc.applyUserActions([["BulkUpdateRecord", "Staff", [1, 2], { Name: ["Ann", "Benny"], Salary: [1, 2] }]]);
+      await b.doc.sync();
+      assert.deepEqual((await tableValues(b, "Staff"))[3].Name, ["Ann", "Benny"]);
+      // Only owners.
+      await assert.isRejected(b.doc.restoreSnapshot(earlier), /Only owners can restore/);
+      await a.doc.restoreSnapshot(earlier);
+      // The document is replaced: browsers that have it open must reopen it.
+      await assert.isRejected(b.doc.sync(), /earlier version of this document was restored/);
+      await assert.isRejected(a.doc.fetchTable("Staff"), /closed/);
+      assert.deepEqual(relay.actions[relay.actions.length - 1].kind, "restore");
+      a = await join(relay, alice);
+      b = await join(relay, bob);
+      assert.deepEqual((await tableValues(a, "Staff"))[3], { Name: ["Anna", "Ben"], Salary: [52100, 61300],
+        manualSort: [1, 2] });
+      assert.deepEqual((await tableValues(b, "Staff"))[3].Salary, [52100, 61300]);
+      // Still private, under the current keys.
+      assert.notInclude(await readableWithDocKey(relay), "61300");
+      // And it goes on from there.
+      await b.doc.applyUserActions([["UpdateRecord", "Staff", 2, { Name: "Benjamin" }]]);
+      await a.doc.sync();
+      assert.deepEqual((await tableValues(a, "Staff"))[3].Name, ["Anna", "Benjamin"]);
+    });
+
+    it("exports the whole document, with extra changes that aren't applied", async function() {
+      const content = await a.doc.exportPlain([
+        () => [["AddRecord", "_grist_ACLResources", null, { tableId: "Staff", colIds: "Salary" }]],
+        previous => [["AddRecord", "_grist_ACLRules", null, {
+          resource: previous[0], aclFormula: "user.UserID not in [1, 2]", permissionsText: "-RU", rulePos: 1,
+        }]],
+      ]);
+      assert.equal(content.actionNum, relay.head);
+      assert.deepEqual(content.tables.Staff[3].Salary, [52100, 61300]);
+      const rules = content.tables._grist_ACLRules;
+      const index = rules[3].aclFormula.indexOf("user.UserID not in [1, 2]");
+      assert.isAbove(index, -1);
+      assert.include(String(rules[3].aclFormulaParsed[index]), "NotIn");
+      // Not applied to the document.
+      assert.notInclude((await tableValues(a, "_grist_ACLRules"))[3].aclFormula, "user.UserID not in [1, 2]");
+      // Making the document regular again: private columns get access rules for those who could
+      // read them.
+      const members = relay.listMembers();
+      const plain = await a.doc.exportPlain(makeAccessRuleActions(a.doc.docData, a.doc.privacy, a.doc.keyring,
+        members));
+      const resources = plain.tables._grist_ACLResources;
+      const resourceRef = resources[2][resources[3].colIds.indexOf("Salary")];
+      assert.equal(resources[3].tableId[resources[2].indexOf(resourceRef)], "Staff");
+      const aclRules = plain.tables._grist_ACLRules;
+      const ruleIndex = aclRules[3].resource.indexOf(resourceRef);
+      assert.equal(aclRules[3].aclFormula[ruleIndex], `user.UserID not in [${alice.userId}, ${bob.userId}]`);
+      assert.equal(aclRules[3].permissionsText[ruleIndex], "-RU");
+      assert.include(String(aclRules[3].aclFormulaParsed[ruleIndex]), "NotIn");
+
+      // Only for members who can read everything.
+      await giveKeys(relay, DOC_SCOPE, carol);
+      const c2 = await join(relay, carol);
+      await assert.isRejected(c2.doc.exportPlain(), /can read everything/);
+      leave(relay, c2);
+    });
+  });
+
+  describe("suggestions", function() {
+    let relay: MemoryRelay;
+    let a: Participant;   // Owner.
+    let d: Participant;   // Viewer, who may suggest changes.
+
+    before(async function() {
+      relay = await newRelay(dave);
+      a = await join(relay, alice, { create: true });
+      await giveKeys(relay, DOC_SCOPE, dave);
+      await a.doc.applyUserActions([
+        ["AddTable", "Staff", [
+          { id: "Name", type: "Text", isFormula: false },
+          { id: "Salary", type: "Numeric", isFormula: false },
+        ]],
+        ["BulkAddRecord", "Staff", [null, null], { Name: ["Ana", "Ben"], Salary: [52100, 61300] }],
+      ]);
+      const cols = await tableValues(a, "_grist_Tables_column");
+      await a.doc.createScopeKey(makeColumnScope(), [{ ...alice, vaultUserId: vaultIdFor(alice) }],
+        cols[2][cols[3].colId.indexOf("Salary")], { compact: true });
+      d = await join(relay, dave, { canSuggest: true });
+    });
+
+    after(function() {
+      for (const p of [a, d]) { leave(relay, p); }
+    });
+
+    it("keeps changes local while suggesting, holding back others' changes", async function() {
+      assert.isTrue(d.doc.isSuggesting);
+      const head = relay.head;
+      await d.doc.applyUserActions([["UpdateRecord", "Staff", 2, { Name: "Benjamin" }]]);
+      await d.doc.applyUserActions([["AddRecord", "Staff", null, { Name: "Cleo" }]]);
+      assert.equal(d.doc.pendingSuggestionCount, 2);
+      assert.equal(relay.head, head);
+      assert.deepEqual((await tableValues(d, "Staff"))[3].Name, ["Ana", "Benjamin", "Cleo"]);
+      // Undoing the latest one.
+      const latest = d.received[d.received.length - 1].actionGroup;
+      await d.doc.applyUserActionsById([latest.actionNum], [latest.actionHash], true);
+      assert.deepEqual((await tableValues(d, "Staff"))[3].Name, ["Ana", "Benjamin"]);
+      assert.equal(d.doc.pendingSuggestionCount, 1);
+      // Changes from others wait.
+      await a.doc.applyUserActions([["UpdateRecord", "Staff", 1, { Name: "Anna" }]]);
+      await d.doc.sync();
+      assert.deepEqual((await tableValues(d, "Staff"))[3].Name, ["Ana", "Benjamin"]);
+      // Suggestions can't involve private columns.
+      await assert.isRejected(d.doc.applyUserActions([["UpdateRecord", "Staff", 1, { Salary: 1 }]]),
+        /member with access|private/);
+    });
+
+    it("sends suggestions, which members who can edit apply or dismiss", async function() {
+      await d.doc.submitSuggestion("Ben prefers Benjamin");
+      // Undone locally, with others' changes applied now.
+      assert.equal(d.doc.pendingSuggestionCount, 0);
+      assert.deepEqual((await tableValues(d, "Staff"))[3].Name, ["Anna", "Ben"]);
+      assert.lengthOf(relay.suggestions, 1);
+      assert.notInclude(relay.suggestions[0].payload, "Benjamin");
+      // Only its author sees it among viewers; members who can edit see all.
+      assert.deepEqual((await d.doc.listSuggestions()).map(s => s.desc), ["Ben prefers Benjamin"]);
+      const [suggestion] = await a.doc.listSuggestions();
+      assert.deepEqual(suggestion.userActions, [["UpdateRecord", "Staff", 2, { Name: "Benjamin" }]]);
+      assert.equal(suggestion.userId, dave.userId);
+      await a.doc.applySuggestion(suggestion.id);
+      assert.lengthOf(relay.suggestions, 0);
+      await d.doc.sync();
+      assert.deepEqual((await tableValues(d, "Staff"))[3].Name, ["Anna", "Benjamin"]);
+      assert.match(a.doc.getActionSummaries().slice(-1)[0].desc!, /Suggested by dave@example.com: Ben prefers Benjamin/);
+
+      await d.doc.applyUserActions([["AddRecord", "Staff", null, { Name: "Cleo" }]]);
+      await d.doc.submitSuggestion("");
+      await a.doc.dismissSuggestion((await a.doc.listSuggestions())[0].id);
+      assert.lengthOf(relay.suggestions, 0);
+      await a.doc.sync();
+      assert.deepEqual((await tableValues(a, "Staff"))[3].Name, ["Anna", "Benjamin"]);
+    });
+  });
+
+  describe("forms", function() {
+    let relay: MemoryRelay;
+    let a: Participant;
+    let sectionId: number;
+    const keys: EncryptedFormKeys = { formId: "", publicKey: "", privateKey: "", linkKey: "" };
+    // Files sent with answers, as the server keeps them (encrypted by respondents).
+    const inboxFiles = new Map<string, Uint8Array>();
+
+    // What the member's browser does for reading answers (see DocConversion.makeFormAnswerHelpers()).
+    function formHelpers(p: Participant): FormAnswerHelpers {
+      return {
+        getPrivateKey: async (formKeys) => {
+          if (formKeys.privateKey) { return formKeys.privateKey; }
+          const sealed = formKeys.sealedPrivateKey!;
+          if (!sealed.keyIds.every(keyId => p.doc.keyring.holds(keyId))) { return null; }
+          const data = await p.doc.keyring.decryptWithAll(sealed.keyIds, base64ToBytes(sealed.data));
+          return new TextDecoder().decode(data);
+        },
+        storeFile: async (file, scope) => {
+          const data = await decryptFormFile(file.key, inboxFiles.get(file.fileId)!);
+          const { ciphertext, ref } = await encryptFile(p.doc.keyring, scope, data);
+          const { fileId } = await p.client.uploadFile(ciphertext);
+          return makeFileIdent({ fileId, ...ref });
+        },
+      };
+    }
+
+    before(async function() {
+      relay = await newRelay(bob);
+      a = await join(relay, alice, { create: true });
+      await a.doc.applyUserActions([
+        ["AddTable", "Contacts", [
+          { id: "Name", type: "Text", isFormula: false },
+          { id: "Age", type: "Numeric", isFormula: false },
+          { id: "Secret", type: "Text", isFormula: false },
+          { id: "Upper", type: "Text", isFormula: true, formula: "$Name.upper()" },
+        ]],
+      ]);
+      const tables = await tableValues(a, "_grist_Tables");
+      const tableRef = tables[2][tables[3].tableId.indexOf("Contacts")];
+      const result = await a.doc.applyUserActions([["CreateViewSection", tableRef, 0, "form", null, null]]);
+      sectionId = result.retValues[0].sectionRef;
+      const cols = await tableValues(a, "_grist_Tables_column");
+      await a.doc.createScopeKey(makeColumnScope(), [{ ...alice, vaultUserId: vaultIdFor(alice) }],
+        cols[2].find((_, i) => cols[3].colId[i] === "Secret" && cols[3].parentId[i] === tableRef), { compact: true });
+      Object.assign(keys, await generateFormKeys());
+    });
+
+    after(function() {
+      leave(relay, a);
+    });
+
+    it("gives respondents the form's questions, without private columns or formulas", async function() {
+      const spec = await buildFormSpec(a.doc.docData, a.doc.privacy, sectionId, keys,
+        async tableId => (await a.doc.fetchTable(tableId)).tableData);
+      const colIds = Object.values(spec.form.formFieldsById).map((f: any) => f.colId);
+      assert.sameMembers(colIds, ["Name", "Age"]);
+      assert.equal(spec.form.formTableId, "Contacts");
+      // Encrypted with the link key: the server can't read it, nor change it.
+      const encrypted = await encryptFormSpec(keys.linkKey, spec);
+      assert.notInclude(new TextDecoder().decode(encrypted), "Contacts");
+      assert.deepEqual(await decryptFormSpec(keys.linkKey, encrypted), spec);
+      encrypted[20] ^= 1;
+      await assert.isRejected(decryptFormSpec(keys.linkKey, encrypted));
+      const otherLinkKey = (await generateFormKeys()).linkKey;
+      await assert.isRejected(decryptFormSpec(otherLinkKey, await encryptFormSpec(keys.linkKey, spec)));
+    });
+
+    it("adds answers to the document, removing them from the inbox at the same time", async function() {
+      await a.doc.applyUserActions([["UpdateRecord", "_grist_Views_section", sectionId, {
+        shareOptions: JSON.stringify({ form: true, publish: true, encryptedForm: keys }),
+      }]]);
+      const answer = async (colValues: object) => bytesToBase64(await encryptFormAnswer(keys.publicKey,
+        { v: 1, tableId: "Contacts", colValues: colValues as any }));
+      relay.inbox.push(
+        { id: 1, formId: keys.formId, payload: await answer({ Name: "Zoe", Age: 31 }), timeMs: 0 },
+        // Values for columns that aren't in the form (here a private one) are left out.
+        { id: 2, formId: keys.formId, payload: await answer({ Name: "Yan", Secret: "intruder" }), timeMs: 0 },
+        // Not readable: dropped.
+        { id: 3, formId: keys.formId, payload: bytesToBase64(new Uint8Array(100)), timeMs: 0 },
+        // For a form that isn't the document's: dropped.
+        { id: 4, formId: "f".repeat(32), payload: await answer({ Name: "Xi" }), timeMs: 0 },
+      );
+      const added = await a.doc.importFormAnswers(entries => readFormAnswers(a.doc.docData, a.doc.privacy, entries,
+        formHelpers(a)));
+      assert.equal(added, 2);
+      assert.deepEqual(relay.inbox, []);
+      const rows = (await tableValues(a, "Contacts"))[3];
+      assert.deepEqual(rows.Name, ["Zoe", "Yan"]);
+      assert.deepEqual(rows.Secret, ["", ""]);
+      assert.deepEqual(rows.Upper, ["ZOE", "YAN"]);
+      // Members who joined later see them, as any change.
+      await giveKeys(relay, DOC_SCOPE, bob);
+      const b = await join(relay, bob);
+      assert.deepEqual((await tableValues(b, "Contacts"))[3].Name, ["Zoe", "Yan"]);
+      // An answer someone else added first isn't added twice.
+      relay.inbox.push({ id: 5, formId: keys.formId, payload: await answer({ Name: "Wu" }), timeMs: 0 });
+      await Promise.all([
+        a.doc.importFormAnswers(entries => readFormAnswers(a.doc.docData, a.doc.privacy, entries, formHelpers(a))),
+        b.doc.importFormAnswers(entries => readFormAnswers(b.doc.docData, b.doc.privacy, entries, formHelpers(b))),
+      ]);
+      await a.doc.sync();
+      assert.deepEqual((await tableValues(a, "Contacts"))[3].Name, ["Zoe", "Yan", "Wu"]);
+      leave(relay, b);
+    });
+
+    it("takes answers for private columns, and files, for members who can read them", async function() {
+      // Alice publishes the form with Secret in it: its private key is sealed with Secret's key.
+      const secretScope = a.doc.privacy.scopesOf("Contacts", "Secret")[0];
+      const keyIds = [a.doc.keyring.currentKeyId(secretScope)];
+      const sealedKeys: EncryptedFormKeys = { ...await generateFormKeys(), scopes: [secretScope] };
+      sealedKeys.sealedPrivateKey = { keyIds, data: bytesToBase64(await a.doc.keyring.encryptWithAll(keyIds,
+        new TextEncoder().encode(sealedKeys.privateKey))) };
+      delete sealedKeys.privateKey;
+      await a.doc.applyUserActions([
+        ["AddColumn", "Contacts", "Photo", { type: "Attachments", isFormula: false }],
+      ]);
+      const tables = await tableValues(a, "_grist_Tables");
+      const tableRef = tables[2][tables[3].tableId.indexOf("Contacts")];
+      const result = await a.doc.applyUserActions([["CreateViewSection", tableRef, 0, "form", null, null]]);
+      const formSection = result.retValues[0].sectionRef;
+      const cols = await tableValues(a, "_grist_Tables_column");
+      const photoRef = cols[2].find((_, i) => cols[3].parentId[i] === tableRef && cols[3].colId[i] === "Photo")!;
+      const fields = await tableValues(a, "_grist_Views_section_field");
+      if (!fields[2].some((_, i) => fields[3].parentId[i] === formSection && fields[3].colRef[i] === photoRef)) {
+        await a.doc.applyUserActions([["AddRecord", "_grist_Views_section_field", null,
+          { parentId: formSection, colRef: photoRef, parentPos: 100 }]]);
+      }
+      await a.doc.applyUserActions([["UpdateRecord", "_grist_Views_section", formSection, {
+        shareOptions: JSON.stringify({ form: true, publish: true, encryptedForm: sealedKeys }),
+      }]]);
+      const spec = await buildFormSpec(a.doc.docData, a.doc.privacy, formSection, sealedKeys,
+        async tableId => (await a.doc.fetchTable(tableId)).tableData);
+      assert.includeMembers(Object.values(spec.form.formFieldsById).map((f: any) => f.colId), ["Secret", "Photo"]);
+
+      // A respondent sends an answer, with a file.
+      const { key, payload } = await encryptFormFile(new TextEncoder().encode("%PDF resume"));
+      inboxFiles.set("1".repeat(32), payload);
+      relay.inbox.push({ id: 10, formId: sealedKeys.formId, timeMs: Date.now(), payload: bytesToBase64(
+        await encryptFormAnswer(sealedKeys.publicKey, { v: 1, tableId: "Contacts",
+          colValues: { Name: "Vic", Secret: "top secret", Photo: ["L", -1] },
+          files: [{ fileId: "1".repeat(32), key, name: "resume.pdf", size: 11 }] })) });
+
+      // Bob can't read Secret: he leaves the answer to others.
+      await giveKeys(relay, DOC_SCOPE, bob);
+      const b = await join(relay, bob);
+      assert.equal(await b.doc.importFormAnswers(entries => readFormAnswers(b.doc.docData, b.doc.privacy, entries,
+        formHelpers(b))), 0);
+      assert.lengthOf(relay.inbox, 1);
+      // Alice can.
+      assert.equal(await a.doc.importFormAnswers(entries => readFormAnswers(a.doc.docData, a.doc.privacy, entries,
+        formHelpers(a))), 1);
+      assert.deepEqual(relay.inbox, []);
+      const rows = (await tableValues(a, "Contacts"))[3];
+      assert.equal(rows.Secret[rows.Secret.length - 1], "top secret");
+      const photo = rows.Photo[rows.Photo.length - 1] as any[];
+      const attachments = await tableValues(a, "_grist_Attachments");
+      const index = attachments[2].indexOf(photo[1]);
+      assert.equal(attachments[3].fileName[index], "resume.pdf");
+      const ref = parseFileIdent(attachments[3].fileIdent[index] as string)!;
+      const fileData = await decryptFile(a.doc.keyring, ref, await a.client.fetchFile(ref.fileId));
+      assert.equal(new TextDecoder().decode(fileData), "%PDF resume");
+      // The private value stays sealed for others.
+      assert.notInclude(await readableWithDocKey(relay), "top secret");
+      await b.doc.sync();
+      const bRows = (await tableValues(b, "Contacts"))[3];
+      assert.equal(bRows.Secret[bRows.Secret.length - 1], LOCKED_CELL);
+      leave(relay, b);
+    });
+
+    it("describes the document's structure for the formula assistant, in the browser", async function() {
+      const prompt = await a.doc.getFormulaPrompt("Contacts", "Upper",
+        { includeAllTables: true, includeLookups: true });
+      assert.include(prompt, "class Contacts:");
+      assert.include(prompt, "Age: float");
+      assert.include(prompt, "def Upper(rec: Contacts) -> str:");
+      // No values in it.
+      assert.notInclude(prompt, "Zoe");
+      assert.equal(await a.doc.convertFormulaCompletion("Here:\n```python\nreturn rec.Name.lower()\n```"),
+        "$Name.lower()");
+    });
+  });
+
+  describe("against a server changing keys or private columns", function() {
+    let relay: MemoryRelay;
+    let a: Participant;   // Owner, can read Salary.
+    let c: Participant;   // Can't.
+    let scope: string;
+
+    before(async function() {
+      relay = await newRelay(bob, carol);
+      a = await join(relay, alice, { create: true });
+      await giveKeys(relay, DOC_SCOPE, bob, carol);
+      await a.doc.applyUserActions([
+        ["AddTable", "Staff", [{ id: "Name", type: "Text", isFormula: false },
+          { id: "Salary", type: "Numeric", isFormula: false }]],
+        ["BulkAddRecord", "Staff", [null, null], { Name: ["Ana", "Ben"], Salary: [52100, 61300] }],
+      ]);
+      const cols = await tableValues(a, "_grist_Tables_column");
+      scope = makeColumnScope();
+      await a.doc.createScopeKey(scope, [{ ...alice, vaultUserId: vaultIdFor(alice) }],
+        cols[2][cols[3].colId.indexOf("Salary")], { compact: true });
+      c = await join(relay, carol);
+    });
+
+    after(function() {
+      for (const p of [a, c]) { leave(relay, p); }
+    });
+
+    it("keeps columns private when the server forgets they are", async function() {
+      const binding = relay.bindings.find(b => b.scope === scope)!;
+      relay.bindings = relay.bindings.filter(b => b !== binding);
+      try {
+        // Members who open the document still know, from what members recorded.
+        const c2 = await join(relay, carol);
+        assert.deepEqual((await tableValues(c2, "Staff"))[3].Salary, [LOCKED_CELL, LOCKED_CELL]);
+        leave(relay, c2);
+        // New values stay sealed.
+        await a.doc.refreshKeys();
+        await a.doc.applyUserActions([["UpdateRecord", "Staff", 1, { Salary: 99999 }]]);
+        assert.notInclude(await readableWithDocKey(relay), "99999");
+        await c.doc.sync();
+        assert.deepEqual((await tableValues(c, "Staff"))[3].Salary, [LOCKED_CELL, LOCKED_CELL]);
+      } finally {
+        relay.bindings.push(binding);
+      }
+    });
+
+    it("refuses key changes members didn't make", async function() {
+      // The server says the column was made public (without a record of it by a member).
+      relay.bindings.find(b => b.scope === scope)!.releasedAt = relay.head + 1;
+      relay.actions.push({ actionNum: relay.head + 1, kind: "key", keyId: relay.currentKey(scope)!.keyId,
+        payload: "", userId: alice.userId, timeMs: Date.now() });
+      await assert.isRejected(c.doc.sync(), /weren't made by members/);
+      // Nothing got revealed.
+      assert.notInclude(await readableWithDocKey(relay), "61300");
+      const c2 = await join(relay, carol).catch(e => e);
+      assert.match(String(c2), /weren't made by members/);
+    });
+
+    it("never uses keys the server made up", async function() {
+      // A fresh document, whose key the server replaces with one it made for the members.
+      const relay2 = await newRelay(bob);
+      const a2 = await join(relay2, alice, { create: true });
+      await a2.doc.applyUserActions([["AddRecord", "Table1", null, { A: "before" }]]);
+      const fakeKeyId = makeKeyId(DOC_SCOPE);
+      const wraps = await vault.createDocumentKey([recipient(alice)]);
+      for (const key of relay2.keys) { key.current = false; }
+      relay2.keys.push({ keyId: fakeKeyId, scope: DOC_SCOPE, current: true, rotateOnNextEdit: false,
+        actionNum: relay2.head + 1 });
+      relay2.wraps.push({ keyId: fakeKeyId, userId: alice.userId, keyVersion: 1,
+        wrappedKey: bytesToBase64(wraps.get(vaultIdFor(alice))!.wrappedKey) });
+      relay2.actions.push({ actionNum: relay2.head + 1, kind: "key", keyId: fakeKeyId, payload: "",
+        userId: bob.userId, timeMs: Date.now() });
+      await assert.isRejected(a2.doc.sync(), /weren't made by members/);
+      // Reopening: the made-up key isn't used to write anything.
+      leave(relay2, a2);
+      const reopened = await join(relay2, alice).catch(e => e);
+      assert.match(String(reopened), /weren't made by members/);
+      assert.isFalse(relay2.actions.some(act => act.kind === "change" && act.keyId === fakeKeyId));
+    });
+
+    it("checks that copies of keys are of the keys members recorded", async function() {
+      // The server gives Alice a copy of another key, under the column key's id.
+      const keyId = relay.currentKey(scope)!.keyId;
+      const wrap = relay.wraps.find(w => w.keyId === keyId && w.userId === alice.userId)!;
+      const original = wrap.wrappedKey;
+      const other = await vault.createDocumentKey([recipient(alice)]);
+      wrap.wrappedKey = bytesToBase64(other.get(vaultIdFor(alice))!.wrappedKey);
+      try {
+        const keyring = new Keyring(vault, async () => relay.getKeys(alice.userId), relay.getKeys(alice.userId));
+        keyring.setHistory(a.doc.keyring.history);
+        await assert.isRejected(keyring.encrypt(keyId, new Uint8Array([1])), /is of another key/);
+      } finally {
+        wrap.wrappedKey = original;
+      }
     });
   });
 });

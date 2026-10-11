@@ -136,6 +136,8 @@ import { DEFAULT_CACHE_TTL, DocManager } from "app/server/lib/DocManager";
 import { DocPluginManager } from "app/server/lib/DocPluginManager";
 import { DocSession, DocSessionPrecursor, makeExceptionalDocSession, OptDocSession } from "app/server/lib/DocSession";
 import { createAttachmentsIndex, DocStorage, REMOVE_UNUSED_ATTACHMENTS_DELAY } from "app/server/lib/DocStorage";
+import { getDocLock } from "app/server/lib/encryption/docLocks";
+import { finishPendingConversion } from "app/server/lib/encryption/EncryptedDocStorage";
 import { expandQuery, getFormulaErrorForExpandQuery } from "app/server/lib/ExpandedQuery";
 import { GranularAccess, GranularAccessForBundle } from "app/server/lib/GranularAccess";
 import { GristServer } from "app/server/lib/GristServer";
@@ -848,6 +850,12 @@ export class ActiveDoc extends EventEmitter {
           useExisting: options?.useExisting,
         });
       } else {
+        // It may have just been decrypted, without its new content in place yet (unless it's
+        // being converted now).
+        if (!getDocLock(this.docName) && await finishPendingConversion(
+          this._docManager.storageManager.getPath(this.docName), { encrypted: false })) {
+          this._docManager.storageManager.markAsChanged(this.docName, "edit");
+        }
         await this.docStorage.openFile({
           beforeMigration: async (currentVersion, newVersion) => {
             return this._beforeMigration(docSession, "storage", currentVersion, newVersion);

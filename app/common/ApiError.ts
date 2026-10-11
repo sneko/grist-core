@@ -36,6 +36,9 @@ export interface ApiErrorDetails {
   tips?: ApiTip[];
 
   memos?: Memo[];
+
+  // For documents locked by a member for a while (e.g. being converted to or from encryption).
+  docLock?: { reason: string, userName: string };
 }
 
 export type ApiErrorCode =
@@ -43,7 +46,8 @@ export type ApiErrorCode =
   "FormNotFound" |
   "FormNotPublished" |
   "ContextLimitExceeded" |
-  "RestartUnavailable";
+  "RestartUnavailable" |
+  "DocLocked";
 
 /**
  * An error with an http status code.

@@ -52,7 +52,6 @@ import { DocPref } from "app/gen-server/entity/DocPref";
 import { Document, FilteredDocument } from "app/gen-server/entity/Document";
 import { Group } from "app/gen-server/entity/Group";
 import { Limit } from "app/gen-server/entity/Limit";
-import { Login } from "app/gen-server/entity/Login";
 import { AccessOption, AccessOptionWithRole, Organization } from "app/gen-server/entity/Organization";
 import { Pref } from "app/gen-server/entity/Pref";
 import {
@@ -2294,6 +2293,8 @@ export class HomeDBManager implements HomeDBAuth {
             await scrubUserFromOrg(org.id, parseInt(deltaUser, 10), userId, manager);
           }
         }
+        await this._failIfEncryptedDocsUnreadable(manager,
+          await this._getDocsInheritingFrom(manager, { orgId: org.id }));
 
         // Get docIds to invalidate, but publish the invalidation once the transaction commits.
         this.caches?.addInvalidationDocAccess(notifications,
@@ -2396,6 +2397,8 @@ export class HomeDBManager implements HomeDBAuth {
       // If the users in workspace were changed, make a call to repair the guests in the org.
       if (userIdDelta) {
         await this._repairOrgGuests(scope, orgId, manager);
+        await this._failIfEncryptedDocsUnreadable(manager,
+          await this._getDocsInheritingFrom(manager, { wsId: ws.id }));
         // Get docIds to invalidate, but publish the invalidation once the transaction commits.
         this.caches?.addInvalidationDocAccess(notifications,
           await this._getDocsInheritingFrom(manager, { wsId: ws.id }));
@@ -2428,7 +2431,7 @@ export class HomeDBManager implements HomeDBAuth {
       const doc = await this._loadDocAccess(scope, analysis.permissionThreshold, manager);
       this._failIfPowerfulAndChangingSelf(analysis, { data: doc, status: 200 });
       if (isEncryptedDoc(doc)) {
-        await this._checkEncryptedDocPermissions(doc.id, delta, manager);
+        this._failIfEncryptedDocMadePublic(delta);
       }
       await this._failIfTooManyNewUserInvites({
         orgKey: doc.workspace.org.id,
@@ -2473,6 +2476,11 @@ export class HomeDBManager implements HomeDBAuth {
         // If the users in the doc were changed, make calls to repair workspace then org guests.
         await this._repairWorkspaceGuests(scope, doc.workspace.id, manager);
         await this._repairOrgGuests(scope, doc.workspace.org.id, manager);
+      }
+      if (isEncryptedDoc(doc)) {
+        await this._failIfEncryptedDocsUnreadable(manager, [doc.id]);
+      }
+      if (userIdDelta) {
         // The callback approach is to publish the invalidation after the transaction commits.
         this.caches?.addInvalidationDocAccess(notifications, [doc.id]);
         notifications.push(this._inviteNotification(userId, doc, userIdDelta, membersBefore));
@@ -2826,6 +2834,9 @@ export class HomeDBManager implements HomeDBAuth {
           await this._repairOrgGuests(scope, oldWs.org.id, manager);
           await this._repairOrgGuests(scope, doc.workspace.org.id, manager);
         }
+      }
+      if (isEncryptedDoc(doc)) {
+        await this._failIfEncryptedDocsUnreadable(manager, [doc.id]);
       }
       // The callback approach is to publish the invalidation after the transaction commits.
       this.caches?.addInvalidationDocAccess(notifications, [doc.id]);
@@ -4295,30 +4306,60 @@ export class HomeDBManager implements HomeDBAuth {
 
   /**
    * Encrypted documents can only be read by members holding their key, which public access
-   * can't provide: they must remain restricted to their members (as in Docs and Drive). And
-   * removing all members holding the key would leave nobody able to read the document.
+   * can't provide: they must remain restricted to their members (as in Docs and Drive).
    */
-  private async _checkEncryptedDocPermissions(docId: string, delta: PermissionDelta, manager: EntityManager) {
+  private _failIfEncryptedDocMadePublic(delta: PermissionDelta) {
     const users = delta.users || {};
     for (const email of [EVERYONE_EMAIL, ANONYMOUS_USER_EMAIL]) {
       if (users[email]) {
         throw new ApiError("Encrypted documents must remain restricted to their members", 400);
       }
     }
-    const removedEmails = Object.keys(users).filter(email => users[email] === null).map(normalizeEmail);
-    if (removedEmails.length === 0) { return; }
-    const holders: { email: string }[] = await manager.createQueryBuilder()
-      .select("logins.email", "email")
+  }
+
+  /**
+   * Refuses a change of who has access (to documents, workspaces or sites), or of where documents
+   * are, if it would leave nobody holding the key of an encrypted document with access to it:
+   * keys can only be given out by members holding them, so its content could never be read
+   * again. Called within the transaction making the change, once made: access is as it would be
+   * after it, including access inherited from workspaces and sites.
+   */
+  private async _failIfEncryptedDocsUnreadable(manager: EntityManager, docIds: string[]) {
+    if (docIds.length === 0) { return; }
+    const holders: { docId: string, userId: number, name: string }[] = await manager.createQueryBuilder()
+      .select("wraps.doc_id", "docId")
+      .addSelect("wraps.user_id", "userId")
+      .addSelect("docs.name", "name")
       .from(DocEncryptionKeyWrap, "wraps")
       .innerJoin(DocEncryptionKey, "keys", "keys.doc_id = wraps.doc_id AND keys.key_id = wraps.key_id")
-      .innerJoin(Login, "logins", "logins.user_id = wraps.user_id")
-      .where("wraps.doc_id = :docId", { docId })
+      .innerJoin(Document, "docs", "docs.id = wraps.doc_id")
+      .where("wraps.doc_id IN (:...docIds)", { docIds })
       .andWhere("keys.scope = :scope", { scope: "doc" })
       .andWhere("keys.retired_at IS NULL")
       .getRawMany();
-    if (holders.length > 0 && holders.every(h => removedEmails.includes(normalizeEmail(h.email)))) {
-      throw new ApiError("This would leave nobody able to read this encrypted document: " +
-        "keep at least one member holding its key", 400);
+    const byDoc = new Map<string, typeof holders>();
+    for (const h of holders) {
+      byDoc.set(h.docId, [...(byDoc.get(h.docId) || []), h]);
+    }
+    for (const [docId, docHolders] of byDoc) {
+      let readable = false;
+      for (const { userId } of docHolders) {
+        if (await this._canAccessDoc(manager, docId, userId)) { readable = true; break; }
+      }
+      if (!readable) {
+        throw new ApiError(`This would leave nobody able to read the encrypted document "${docHolders[0].name}": ` +
+          "keep at least one member holding its key with access to it", 400);
+      }
+    }
+  }
+
+  private async _canAccessDoc(manager: EntityManager, docId: string, userId: number): Promise<boolean> {
+    try {
+      const doc = await this.getDocImpl({ urlId: docId, userId }, manager);
+      return Boolean(doc.access) && !doc.removedAt;
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 403 || e.status === 404)) { return false; }
+      throw e;
     }
   }
 

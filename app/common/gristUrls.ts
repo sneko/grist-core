@@ -1071,6 +1071,26 @@ export interface EncryptionClientConfig {
   mockKey?: string;
   // URL prefixes of custom widgets allowed in encrypted documents, besides those Grist serves.
   allowedWidgets?: string[];
+  // An AI service browsers may call directly for encrypted documents (the server can't).
+  assistant?: EncryptionAssistantConfig;
+}
+
+/**
+ * An AI service (with an OpenAI-compatible chat completions endpoint, allowing calls from
+ * browsers) that the formula assistant of encrypted documents calls directly from the browser,
+ * with each user's consent (for each session).
+ */
+export interface EncryptionAssistantConfig {
+  endpoint: string;
+  model?: string;
+  // Who runs it, as shown to users asking for their consent.
+  provider: string;
+  // Whether it's hosted under the same jurisdiction as the users' data (e.g. in the EU, by a
+  // provider not subject to extraterritorial laws), as shown to users.
+  sovereign: boolean;
+  // "user-key": each user enters an API key of their own (kept in their browser only). "none":
+  // the endpoint takes calls without a key (e.g. a gateway authenticating users otherwise).
+  auth: "user-key" | "none";
 }
 
 /**

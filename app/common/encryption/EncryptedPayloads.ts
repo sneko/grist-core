@@ -7,6 +7,7 @@
 import { ActionInfo } from "app/common/ActionBundle";
 import { DocAction, TableDataAction, UserAction } from "app/common/DocActions";
 import { gunzip, gzip } from "app/common/encryption/EncryptionCrypto";
+import { KeyChangeRecord, KeyHistory } from "app/common/encryption/EncryptionTypes";
 import * as marshal from "app/common/marshal";
 
 import type { SealedBlob } from "app/common/encryption/ColumnPrivacy";
@@ -36,6 +37,50 @@ export interface DocSnapshotPayload {
   tables: { [tableId: string]: TableDataAction };
   // Sealed values referred to by columns the snapshot's author couldn't read (CarriedValues).
   blobs?: SealedBlob[];
+  // What members recorded of keys and private columns as of actionNum (see KeyHistory).
+  keyHistory?: KeyHistory;
+}
+
+/** Encrypts a record of a key change (see KeyChangeRecord), with the document key before it. */
+export async function encryptKeyRecord(keyring: Keyring, keyId: string, record: KeyChangeRecord): Promise<Uint8Array> {
+  return keyring.encrypt(keyId, marshalValue(record));
+}
+
+/** Decrypts a record of a key change (throws if it isn't one). */
+export async function decryptKeyRecord(keyring: Keyring, keyId: string, payload: Uint8Array): Promise<KeyChangeRecord> {
+  const record = unmarshalValue(await keyring.decrypt(keyId, payload));
+  if (record?.v !== 1 || typeof record.actionNum !== "number" || typeof record.scope !== "string" ||
+    typeof record.keyId !== "string") {
+    throw new Error("Malformed key change record");
+  }
+  return record;
+}
+
+/**
+ * Changes suggested by a member who can't make them (see EncryptedSuggestion): the user actions
+ * to apply, which a member who can edit the document applies (computing them anew) if they agree.
+ */
+export interface SuggestionBundle {
+  v: 1;
+  userActions: UserAction[];
+  desc: string;       // What the member says of their suggestion.
+  time: number;
+}
+
+export async function encryptSuggestion(keyring: Keyring, keyId: string, bundle: SuggestionBundle) {
+  return keyring.encrypt(keyId, await gzip(marshalValue(bundle)));
+}
+
+/** Decrypts a suggestion (made by another member: throws if it isn't shaped as one). */
+export async function decryptSuggestion(keyring: Keyring, keyId: string,
+  payload: Uint8Array): Promise<SuggestionBundle> {
+  const bundle = unmarshalValue(await gunzip(await keyring.decrypt(keyId, payload)));
+  if (bundle?.v !== 1 || !Array.isArray(bundle.userActions) ||
+    !bundle.userActions.every((a: unknown) => Array.isArray(a) && typeof a[0] === "string") ||
+    typeof bundle.desc !== "string" || typeof bundle.time !== "number") {
+    throw new Error("Malformed suggestion");
+  }
+  return bundle;
 }
 
 export function marshalValue(value: unknown): Uint8Array {

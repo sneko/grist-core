@@ -158,6 +158,8 @@ export class DocApiProxy {
     app.use("/api/docs/:docId/timing/start", withDoc);
     app.use("/api/docs/:docId/timing/stop", withDoc);
     app.use("/api/docs/:docId/forms/:vsId", withDoc);
+    // Forms of encrypted documents are public (whoever has their link can read them).
+    app.use("/api/docs/:docId/encrypted-forms", withDocWithoutAuth);
     app.use("/api/docs/:docId/propose", withDoc);
     app.use("/api/docs/:docId/proposals", withDoc);
     if (isMcpEnabled()) {

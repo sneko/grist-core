@@ -7,7 +7,7 @@ import { DocKeyInfo, DocKeyRecord, ScopeBinding } from "app/common/encryption/En
 import { DocEncryptionKey, DocEncryptionKeyWrap, DocEncryptionScope } from "app/gen-server/entity/DocEncryption";
 import { HomeDBManager } from "app/gen-server/lib/homedb/HomeDBManager";
 
-import { EntityManager, In, IsNull } from "typeorm";
+import { EntityManager, In, IsNull, MoreThan } from "typeorm";
 
 export class EncryptionStore {
   constructor(private _dbManager: HomeDBManager) {}
@@ -118,6 +118,43 @@ export class EncryptionStore {
   /** Flags the current key of a scope for replacement on the next edit. */
   public async requestRotation(docId: string, scope: string) {
     await this._manager.update(DocEncryptionKey, { docId, scope, retiredAt: IsNull() }, { rotateOnNextEdit: true });
+  }
+
+  /**
+   * Undoes key changes recorded after the given entry of the history, which the history doesn't
+   * have (it can only happen if saving the entry failed after they were committed, see
+   * EncryptionRelay.createKey()). Returns whether there were any.
+   */
+  public async dropChangesAfter(docId: string, head: number): Promise<boolean> {
+    return this._dbManager.connection.transaction(async (manager) => {
+      const keys = await manager.find(DocEncryptionKey, { where: { docId, actionNum: MoreThan(head) } });
+      const bound = await manager.find(DocEncryptionScope, { where: { docId, boundAt: MoreThan(head) } });
+      const released = await manager.find(DocEncryptionScope, { where: { docId, releasedAt: MoreThan(head) } });
+      if (keys.length === 0 && bound.length === 0 && released.length === 0) { return false; }
+      const keyIds = keys.map(k => k.keyId);
+      if (keyIds.length > 0) {
+        await manager.delete(DocEncryptionKeyWrap, { docId, keyId: In(keyIds) });
+        await manager.delete(DocEncryptionKey, { docId, keyId: In(keyIds) });
+      }
+      // The keys they replaced are current again.
+      for (const scope of new Set(keys.map(k => k.scope))) {
+        const previous = await manager.findOne(DocEncryptionKey,
+          { where: { docId, scope }, order: { actionNum: "DESC" } });
+        if (previous) { await manager.update(DocEncryptionKey, { docId, keyId: previous.keyId }, { retiredAt: null }); }
+      }
+      if (bound.length > 0) { await manager.delete(DocEncryptionScope, { docId, boundAt: MoreThan(head) }); }
+      if (released.length > 0) {
+        await manager.update(DocEncryptionScope, { docId, releasedAt: MoreThan(head) }, { releasedAt: null });
+      }
+      return true;
+    });
+  }
+
+  /** Forgets all keys of a document, and which columns were private (once it's no longer encrypted). */
+  public async dropAll(manager: EntityManager, docId: string) {
+    await manager.delete(DocEncryptionKeyWrap, { docId });
+    await manager.delete(DocEncryptionKey, { docId });
+    await manager.delete(DocEncryptionScope, { docId });
   }
 
   private async _insertWraps(manager: EntityManager, docId: string, wraps: DocKeyRecord[],

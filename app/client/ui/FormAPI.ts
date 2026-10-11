@@ -1,5 +1,9 @@
 import { BaseAPI, IOptions } from "app/common/BaseAPI";
 import { CellValue, ColValues } from "app/common/DocActions";
+import {
+  decryptFormSpec, encryptFormAnswer, encryptFormFile, FormAnswerFile, FormSpec,
+} from "app/common/encryption/EncryptedForms";
+import { base64ToBytes, bytesToBase64 } from "app/common/encryption/EncryptionCrypto";
 import { addCurrentOrgToPath } from "app/common/urlUtils";
 
 /**
@@ -201,5 +205,66 @@ export class FormAPIImpl extends BaseAPI implements FormAPI {
       url.searchParams.set("utm_source", "grist-forms");
     }
     return url.href;
+  }
+}
+
+/**
+ * Forms of end-to-end encrypted documents (see app/common/encryption/EncryptedForms.ts): the form
+ * is encrypted with a key that's in the link (after "#", which browsers never send to servers),
+ * and answers are encrypted, in the browser, for the document's members only.
+ */
+export class EncryptedFormAPI extends BaseAPI implements FormAPI {
+  private _spec?: FormSpec;
+  // Files attached in the answer being made (see createAttachments()).
+  private _files: FormAnswerFile[] = [];
+
+  constructor(private _homeUrl: string, private _docId: string, private _formId: string, private _linkKey: string,
+    options: IOptions = {}) {
+    super(options);
+  }
+
+  public async getForm(): Promise<Form> {
+    const { spec } = await this.requestJson(this._url(), { method: "GET" });
+    this._spec = await decryptFormSpec(this._linkKey, base64ToBytes(spec));
+    if (this._spec.formId !== this._formId) { throw new Error("Invalid form"); }
+    return this._spec.form;
+  }
+
+  public async createRecord(options: CreateRecordOptions): Promise<number> {
+    if (!this._spec) { throw new Error("Form not loaded"); }
+    const payload = await encryptFormAnswer(this._spec.publicKey, {
+      v: 1, tableId: options.tableId, colValues: options.colValues,
+      ...(this._files.length > 0 ? { files: this._files } : {}),
+    });
+    await this.requestJson(this._url(), {
+      method: "POST",
+      body: JSON.stringify({ payload: bytesToBase64(payload), fileIds: this._files.map(f => f.fileId) }),
+    });
+    this._files = [];
+    // (The record is created later, by a member of the document.)
+    return 0;
+  }
+
+  /**
+   * Encrypts files attached in the answer, each with a key of its own, and sends them. Returns the
+   * ids the answer's cells refer to them by (see FormAnswer.files).
+   */
+  public async createAttachments(options: CreateAttachmentOptions): Promise<number[]> {
+    const ids: number[] = [];
+    for (const file of options.upload.filter(f => f.size > 0)) {
+      const { key, payload } = await encryptFormFile(new Uint8Array(await file.arrayBuffer()));
+      const { fileId } = await this.requestJson(`${this._url()}/files`, {
+        method: "POST",
+        headers: { ...this.defaultHeadersWithoutContentType(), "Content-Type": "application/octet-stream" },
+        body: payload as BodyInit,
+      });
+      this._files.push({ fileId, key, name: file.name, size: file.size });
+      ids.push(-this._files.length);
+    }
+    return ids;
+  }
+
+  private _url() {
+    return `${addCurrentOrgToPath(this._homeUrl)}/api/docs/${this._docId}/encrypted-forms/${this._formId}`;
   }
 }

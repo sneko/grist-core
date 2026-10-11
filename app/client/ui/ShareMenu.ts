@@ -1,4 +1,6 @@
-import { reportKeyGrant } from "app/client/encryption/EncryptionUI";
+import {
+  copyEncryptedDocument, discardSuggestion, reportKeyGrant, sendSuggestion, showSuggestions,
+} from "app/client/encryption/EncryptionUI";
 import { downloadSection, LocalExportFormat } from "app/client/encryption/localExport";
 import { hooks } from "app/client/Hooks";
 import { loadUserManager } from "app/client/lib/imports";
@@ -57,11 +59,24 @@ export function buildShareMenuButton(pageModel: DocPageModel): DomContents {
     const isProposable = Boolean(doc.options?.proposedChanges?.acceptProposals);
     const saveCopy = () => handleSaveCopy({ pageModel, doc, modalTitle: t("Save Document") });
     if (isEncryptedDoc(doc)) {
-      // The server can't copy or export encrypted documents: exports are made by the browser.
-      return shareButton(null, () => [
-        menuManageUsers(doc, pageModel),
-        menuLocalExports(pageModel),
-      ]);
+      return dom.domComputed(pageModel.gristDoc, (gristDoc) => {
+        if (gristDoc?.docComm.encryption?.isSuggesting) {
+          // Changes are suggestions: they're sent (or discarded) from here.
+          return shareButton(t("Send suggestion"), () => [
+            menuItem(() => sendSuggestion(gristDoc), t("Send suggestion"), testId("tb-share-option")),
+            menuItem(() => discardSuggestion(gristDoc), t("Discard my changes"), testId("tb-share-option")),
+            menuItem(() => showSuggestions(gristDoc), t("My suggestions waiting"), testId("tb-share-option")),
+            menuManageUsers(doc, pageModel),
+            menuLocalExports(pageModel),
+          ], { buttonAction: () => sendSuggestion(gristDoc) });
+        }
+        // The server can't copy or export encrypted documents: exports are made by the browser.
+        return shareButton(null, () => [
+          menuManageUsers(doc, pageModel),
+          menuEncryptedCopy(doc, pageModel),
+          menuLocalExports(pageModel),
+        ]);
+      });
     } else if (doc.isSnapshot) {
       const backToCurrent = () => urlState().pushUrl({ doc: buildOriginalUrlId(doc.id, true) });
       return shareButton(t("Back to current"), () => [
@@ -313,6 +328,20 @@ function menuWorkOnCopy(pageModel: DocPageModel, options?: {
 /**
  * Exports of end-to-end encrypted documents, built in the browser from the active widget.
  */
+// Copies of encrypted documents are made by the browser (see EncryptionUI.copyEncryptedDocument).
+function menuEncryptedCopy(doc: Document, pageModel: DocPageModel) {
+  const gristDoc = pageModel.gristDoc.get();
+  const encryption = gristDoc?.docComm.encryption;
+  if (!gristDoc || !encryption || !pageModel.appModel.currentValidUser) { return null; }
+  return [
+    menuDivider(),
+    menuItem(() => copyEncryptedDocument(gristDoc, doc), menuIcon("Copy"), t("Duplicate document"),
+      dom.cls("disabled", !encryption.canReadAll),
+      encryption.canReadAll ? null : hoverTooltip(t("Only members who can read all of the document can copy it")),
+      testId("tb-share-option"), testId("encrypted-copy")),
+  ];
+}
+
 function menuLocalExports(pageModel: DocPageModel) {
   const gristDoc = pageModel.gristDoc.get();
   if (!gristDoc) { return null; }
