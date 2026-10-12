@@ -233,7 +233,7 @@ export class GristWSConnection extends Disposable {
   }
 
   public send(message: any) {
-    this._log(`GristWSConnection.send[${this.established}]`, message);
+    this._log(`GristWSConnection.send[${this.established}]`, redactEncryptedCall(message));
     if (!this._established) {
       return false;
     }
@@ -438,3 +438,13 @@ export class GristWSConnection extends Disposable {
 }
 
 Object.assign(GristWSConnection.prototype, BackboneEvents);
+
+/**
+ * Calls about encrypted documents are logged without their arguments: they carry encrypted
+ * content and keys, which have no place in logs (that may be collected, e.g. by error trackers).
+ */
+function redactEncryptedCall(message: any): any {
+  if (typeof message !== "string") { return message; }
+  const match = /^\{"reqId":(\d+),"method":"(\w*Encrypt\w*)"/.exec(message);
+  return match ? `{"reqId":${match[1]},"method":"${match[2]}","args":"(not logged)"}` : message;
+}

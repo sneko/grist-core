@@ -21,6 +21,7 @@ import { RecordCardPopup } from "app/client/components/RecordCardPopup";
 import { RegionFocusSwitcher } from "app/client/components/RegionFocusSwitcher";
 import { ActionGroupWithCursorPos, UndoStack } from "app/client/components/UndoStack";
 import { ViewLayout } from "app/client/components/ViewLayout";
+import { buildEncryptedAccessRules } from "app/client/encryption/EncryptedAccessRules";
 import { guardDocApi } from "app/client/encryption/serverDataGuard";
 import { get as getBrowserGlobals } from "app/client/lib/browserGlobals";
 import { copyToClipboard } from "app/client/lib/clipboardUtils";
@@ -864,7 +865,8 @@ export class GristDocImpl extends DisposableWithEvents implements GristDoc {
       dom.domComputed(this._activeContent, (content) => {
         return  (
           content === "code" ? dom.create(CodeEditorPanel, this) :
-            content === "acl" ? dom.create(AccessRules, this) :
+            content === "acl" ? (this.docComm.encryption ? dom.create(buildEncryptedAccessRules, this) :
+              dom.create(AccessRules, this)) :
               content === "data" ? dom.create(RawDataPage, this) :
                 content === "suggestions" ? dom.create(ProposedChangesPage, this) :
                   content === "settings" ? dom.create(DocSettingsPage, this) :
@@ -1443,7 +1445,9 @@ Please check webhooks settings, remove invalid webhooks, and clean the queue."))
    * pushing them to actionLog.
    */
   private _onDocUserAction(message: CommDocUserAction) {
-    console.log("GristDoc.onDocUserAction", message);
+    // (Not the content of encrypted documents: logs may be collected, e.g. by error trackers.)
+    const isEncrypted = this.docComm.isEncrypted;
+    console.log("GristDoc.onDocUserAction", isEncrypted ? `(${message.data.docActions.length} actions)` : message);
     let schemaUpdated = false;
     /**
      * If an operation is applied successfully to a document, and then information about
@@ -1460,7 +1464,7 @@ Please check webhooks settings, remove invalid webhooks, and clean the queue."))
     if (this.docComm.isActionFromThisDoc(message)) {
       const docActions = message.data.docActions;
       for (let i = 0, len = docActions.length; i < len; i++) {
-        console.log("GristDoc applying #%d", i, docActions[i]);
+        console.log("GristDoc applying #%d", i, isEncrypted ? docActions[i].slice(0, 2) : docActions[i]);
         this.docData.receiveAction(docActions[i]);
         this.docPluginManager.receiveAction(docActions[i]);
 

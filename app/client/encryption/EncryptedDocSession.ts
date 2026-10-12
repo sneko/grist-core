@@ -22,7 +22,7 @@ import { downloadFromDrive, driveFileIdFromUrl } from "app/client/encryption/dri
 import { getKeyVault } from "app/client/encryption/keyVaults";
 import { getLocalAssistance } from "app/client/encryption/localAssistant";
 import { isLockedHere, lockingHere, showLockOverlay } from "app/client/encryption/lockOverlay";
-import { IDocEncryption, KeyGrantResult } from "app/client/encryption/types";
+import { IDocEncryption, KeyGrantResult, WaitingAnswers } from "app/client/encryption/types";
 import { WorkerEngine } from "app/client/encryption/WorkerEngine";
 import { makeT } from "app/client/lib/localization";
 import { checkBrowserUploadSizeLimit } from "app/client/lib/uploads";
@@ -67,6 +67,7 @@ import { Semaphore } from "async-mutex";
 import { Disposable, dom, Emitter, Observable } from "grainjs";
 import isEqual from "lodash/isEqual";
 import omit from "lodash/omit";
+import uniqBy from "lodash/uniqBy";
 
 const t = makeT("EncryptedDocSession");
 
@@ -80,6 +81,9 @@ const MAX_PARALLEL_ATTACHMENT_FETCHES = 4;
 // docFDs for encrypted documents are made up locally; negative ones never collide with the
 // server's.
 let _nextDocFD = -1;
+
+// How many answers to forms the server lists at once (see EncryptionRelay.listInbox()).
+const MAX_INBOX_LISTED = 200;
 
 /** The server side of an encrypted document, over the client's websocket connection. */
 export class CommRelay implements IEncryptionRelay {
@@ -276,6 +280,8 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
   public readonly keysChanged = this.autoDispose(new Emitter());
   // Emitted when suggestions are added or handled, or when changes are made while suggesting.
   public readonly suggestionsChanged = this.autoDispose(new Emitter());
+  // Emitted when answers to forms arrive, get added, or can't be (see getWaitingAnswers()).
+  public readonly inboxChanged = this.autoDispose(new Emitter());
 
   private _reviewMembers?: () => void;
   private _localDoc: LocalActiveDoc;
@@ -289,6 +295,8 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
   private _lastPrivacy = "";
   private _lockOverlay?: ReturnType<typeof showLockOverlay>;
   private _importScheduled = false;
+  // Why adding answers to forms was last refused, if it was (see getWaitingAnswers()).
+  private _importBlocked: string | null = null;
   private _formSyncTimer?: ReturnType<typeof setTimeout>;
   // What respondents of each form were last given (as JSON), by formId.
   private _uploadedSpecs = new Map<string, string>();
@@ -318,6 +326,12 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
       this._comm.stopListening(this._comm, "clientConnect", this._onConnect);
       for (const url of this._attachmentUrls.values()) { url.then(u => URL.revokeObjectURL(u)).catch(() => {}); }
     });
+    // Published forms follow changes of which columns are private (see _syncForms()).
+    this.autoDispose(this.keysChanged.addListener(() => {
+      if (this._localDoc && getPublishedForms(this._localDoc.docData).length > 0) { this._syncFormsSoon(); }
+      // (Answers waiting may be for keys this member just got.)
+      if (this._localDoc) { this._importAnswersSoon(); }
+    }));
   }
 
   public get canEdit() { return this._localDoc.canEdit; }
@@ -338,6 +352,10 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
 
   public canReadScope(scope: string): boolean {
     return this._keyring.canUseScope(scope);
+  }
+
+  public whyCantEditValues(tableId: string, colId: string) {
+    return this.privacy.whyCantEditValues(tableId, colId, scope => this._keyring.canUseScope(scope));
   }
 
   /** Starts delivering changes from others, once the client is ready to receive them. */
@@ -451,6 +469,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
 
   /** How to open the sharing dialog, where owners accept members (set by the share menu). */
   public setReviewMembers(review: () => void) { this._reviewMembers = review; }
+  public reviewMembers() { this._reviewMembers?.(); }
 
   /** Gives the document's keys to a member waiting for them (see getPendingEncryption()). */
   public async acceptMember(email: string): Promise<void> {
@@ -510,6 +529,13 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
       { granted: [], notReady: [] };
     if (toRemove.length > 0) {
       await this._relay.revokeKeys(toRemove.map(m => m.userId), scope);
+      // Members removed from a private table lose its columns restricted further too (otherwise
+      // they'd get them back if given access to the table again).
+      for (const inner of this._innerScopes(scope)) {
+        const innerHolders = toRemove.filter(m =>
+          m.keyIds.some(keyId => this._keyring.getKey(keyId)?.scope === inner));
+        if (innerHolders.length > 0) { await this._relay.revokeKeys(innerHolders.map(m => m.userId), inner); }
+      }
       await this._localDoc.refreshKeys();
       await this._localDoc.rotateKeys();
     }
@@ -594,9 +620,8 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     let keys = options.encryptedForm || await generateFormKeys();
     // Answers filling private columns are only for members who can read them: the form's private
     // key gets sealed with their keys (those this member holds: fields of others are left out).
-    const scopes = getFormScopes(this._localDoc.docData, this._localDoc.privacy, sectionId)
-      .filter(scope => this._keyring.canUseScope(scope));
-    if (!isEqual(scopes, keys.scopes || [])) {
+    const scopes = this._formScopes(sectionId);
+    if (!this._isFormSealedFor(keys, scopes)) {
       const privateKey = await makeFormAnswerHelpers(this._relay, this._keyring).getPrivateKey(keys);
       if (!privateKey) { throw new Error(t("Only members who can read the columns this form fills can publish it")); }
       const rest = omit(keys, "privateKey", "sealedPrivateKey");
@@ -621,6 +646,44 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     await this._localDoc.applyUserActions([["UpdateRecord", "_grist_Views_section", sectionId, {
       shareOptions: JSON.stringify({ ...options, publish: false }),
     }]], { desc: "Unpublish form" });
+  }
+
+  /**
+   * Answers waiting to be added to the document (for members who can edit it), to what a widget
+   * shows: to its form, or for other widgets, to the forms filling its table. Also why this
+   * member's browser doesn't add them, if it can't: "keys" if they fill private columns the member
+   * can't read (`columns` says which), "blocked" if adding them was refused (`message` says why,
+   * e.g. a calculation the member can't do).
+   */
+  public async getWaitingAnswers(sectionId: number): Promise<WaitingAnswers> {
+    const forms = this.canEdit ? this._formsFilling(sectionId) : [];
+    if (forms.length === 0) { return { count: 0, more: false, reason: null }; }
+    const entries = await this._relay.listInbox();
+    const more = entries.length >= MAX_INBOX_LISTED;
+    const waiting = forms.filter(keys => entries.some(e => e.formId === keys.formId));
+    const count = entries.filter(e => waiting.some(keys => keys.formId === e.formId)).length;
+    if (count === 0) { return { count, more, reason: null }; }
+    const helpers = makeFormAnswerHelpers(this._relay, this._keyring);
+    const unreadable: EncryptedFormKeys[] = [];
+    for (const keys of waiting) {
+      if (!await helpers.getPrivateKey(keys)) { unreadable.push(keys); }
+    }
+    if (unreadable.length > 0) {
+      // (Named as members made them private: whole tables, or columns.)
+      const tables = this._localDoc.docData.getMetaTable("_grist_Tables");
+      const scopes = unreadable.flatMap(keys => keys.scopes || []).filter(scope => !this._keyring.canUseScope(scope));
+      const missing = scopes.flatMap((scope): { kind: "table" | "column", name: string }[] => {
+        const tableRef = this._keyring.boundTableRefs().find(ref => this._keyring.currentScopeOfTable(ref) === scope);
+        if (tableRef) { return [{ kind: "table" as const, name: tables.getRecord(tableRef)?.tableId || "" }]; }
+        return this.privacy.columnsOfScope(scope)
+          .filter(c => this.privacy.getColumn(c.tableId, c.colId)?.ownScopes.includes(scope))
+          .map(c => ({ kind: "column" as const, name: this._columnLabel(c.tableId, c.colId) }));
+      });
+      return { count, more, reason: "keys",
+        missing: uniqBy(missing.filter(m => m.name), m => `${m.kind}:${m.name}`) };
+    }
+    if (this._importBlocked) { return { count, more, reason: "blocked", message: this._importBlocked }; }
+    return { count, more, reason: null };
   }
 
   /** The link to a published form (with its link key, after "#"). */
@@ -772,6 +835,36 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     return { granted: ready.filter(m => m.userId !== this.userId), notReady };
   }
 
+  // The scopes of columns made private within the private table of the given scope, if it's one.
+  private _innerScopes(scope: string): string[] {
+    const tableRef = this._keyring.boundTableRefs().find(ref => this._keyring.currentScopeOfTable(ref) === scope);
+    if (!tableRef) { return []; }
+    const columns = this._localDoc.docData.getMetaTable("_grist_Tables_column").filterRecords({ parentId: tableRef });
+    return [...new Set(columns.map(c => this._keyring.currentScopeOf(c.id)).filter((s): s is string => Boolean(s)))];
+  }
+
+  // "Table › Column", as members see it.
+  // The forms whose answers go to what a widget shows: its own if it's a form, or else the forms
+  // filling its table (published or not: answers sent before unpublishing still get added).
+  private _formsFilling(sectionId: number): EncryptedFormKeys[] {
+    const docData = this._localDoc.docData;
+    const sections = docData.getMetaTable("_grist_Views_section");
+    const section = sections.getRecord(sectionId);
+    if (!section) { return []; }
+    const formSections = section.parentKey === "form" ? [section] :
+      sections.filterRecords({ tableRef: section.tableRef, parentKey: "form" });
+    return formSections.map(s => getFormShareOptions(docData, s.id).encryptedForm)
+      .filter((keys): keys is EncryptedFormKeys => Boolean(keys));
+  }
+
+  private _columnLabel(tableId: string, colId: string): string {
+    const docData = this._localDoc.docData;
+    const table = docData.getMetaTable("_grist_Tables").findRecord("tableId", tableId);
+    const column = table && docData.getMetaTable("_grist_Tables_column").filterRecords({ parentId: table.id })
+      .find(c => c.colId === colId);
+    return `${tableId} › ${column?.label || colId}`;
+  }
+
   private async _makePublic(scope: string | null): Promise<void> {
     if (!scope) { return; }
     await this._localDoc.releaseScope(scope);
@@ -811,6 +904,11 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
         locale: navigator.language || "en-US",
       } : undefined,
       onInvalidChange: change => this._onInvalidChange(change),
+      onAccessGained: () => reportMessage(t("You were given access to more of this document."), {
+        key: "encryption-access-gained",
+        level: "info",
+        actions: [{ label: t("Reload to see it"), action: () => window.location.reload() }],
+      }),
       onOpenStep,
       onRotationFailed: (e) => {
         console.warn("[encryption] Could not replace keys", e);
@@ -848,6 +946,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
 
   private _onInbox = (message: CommEncryptedDocInbox) => {
     if (message.data.docId !== this._docId || this.isDisposed() || this._paused) { return; }
+    this.inboxChanged.emit();
     this._importAnswersSoon();
   };
 
@@ -862,14 +961,15 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
       this._track(this._localDoc.importFormAnswers(entries =>
         readFormAnswers(this._localDoc.docData, this._localDoc.privacy, entries,
           makeFormAnswerHelpers(this._relay, this._keyring)),
-      ).then(() => {}).catch((e) => {
+      ).then(() => { this._importBlocked = null; }).catch((e) => {
         // Answers this member can't add (e.g. they'd need keys they don't hold) are left for others.
         if (e instanceof EncryptionAccessError) {
           console.warn("[encryption] Leaving form answers to members with access", e);
+          this._importBlocked = e.message;
         } else {
           throw e;
         }
-      }));
+      }).finally(() => this.inboxChanged.emit()));
     }, 500);
   }
 
@@ -885,8 +985,26 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
 
   private async _syncForms() {
     for (const { sectionId, keys } of getPublishedForms(this._localDoc.docData)) {
-      await this._uploadFormSpec(sectionId, keys);
+      // Columns it fills became private (or public), or their keys changed: owners publish it again,
+      // so that answers stay readable by those (and only those) who can read these columns.
+      if (this.isOwner && !this._isFormSealedFor(keys, this._formScopes(sectionId))) {
+        await this.publishForm(sectionId);
+      } else {
+        await this._uploadFormSpec(sectionId, keys);
+      }
     }
+  }
+
+  // The scopes of the private columns a form fills, that this member holds (see publishForm()).
+  private _formScopes(sectionId: number): string[] {
+    return getFormScopes(this._localDoc.docData, this._localDoc.privacy, sectionId)
+      .filter(scope => this._keyring.canUseScope(scope));
+  }
+
+  // Whether a form's private key is sealed with the current keys of the given scopes.
+  private _isFormSealedFor(keys: EncryptedFormKeys, scopes: string[]): boolean {
+    return isEqual(scopes, keys.scopes || []) &&
+      isEqual(scopes.map(scope => this._keyring.currentKeyId(scope)), keys.sealedPrivateKey?.keyIds || []);
   }
 
   private async _uploadFormSpec(sectionId: number, keys: EncryptedFormKeys) {

@@ -1,5 +1,6 @@
 import BaseView from "app/client/components/BaseView";
 import { GristDoc } from "app/client/components/GristDoc";
+import { buildPrivateTableMarker, buildWaitingAnswersAlert } from "app/client/encryption/EncryptionUI";
 import { makeT } from "app/client/lib/localization";
 import { ViewRec, ViewSectionRec } from "app/client/models/DocModel";
 import { filterBar } from "app/client/ui/FilterBar";
@@ -113,6 +114,7 @@ export function buildViewSectionDom(options: {
       ),
       dom.maybe(use => use(use(viewInstance.viewSection.table).summarySourceTable), () =>
         cssSigmaIcon("Pivot", testId("sigma"))),
+      dom.domComputed(use => use(vs.table), table => dom.create(buildPrivateTableMarker, gristDoc, table)),
       buildWidgetTitle(
         vs,
         { tableNameHidden, widgetNameHidden, disabled: !renamable },
@@ -125,6 +127,7 @@ export function buildViewSectionDom(options: {
           dom.create(viewSectionMenu, gristDoc, vs),
         ),
     )),
+    dom.create(buildWaitingAnswersAlert, gristDoc, sectionRowId),
     hideTitleControls === true ? null : dom.create(filterBar, gristDoc, vs),
     dom.maybe<BaseView | null>(vs.viewInstance, viewInstance => [
       dom("div.view_data_pane_container.flexvbox",

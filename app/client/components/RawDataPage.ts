@@ -167,6 +167,10 @@ const cssSectionWrapper = styled("div", `
   & .viewsection_title {
     padding: 0px 12px;
   }
+  & .viewsection_alert {
+    margin-left: 12px;
+    margin-right: 12px;
+  }
   & .filter_bar {
     margin-left: 6px;
   }

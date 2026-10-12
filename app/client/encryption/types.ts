@@ -29,6 +29,7 @@ export interface IDocEncryption {
   readonly pendingSuggestionCount: number;
   /** Emitted when suggestions are added or handled, or when changes are made while suggesting. */
   readonly suggestionsChanged: Emitter;
+  readonly inboxChanged: Emitter;
   /** Whether the user can read all of the document (needed to decrypt or copy it). */
   readonly canReadAll: boolean;
   /** The scopes whose keys are needed to read a column (empty if anyone can). */
@@ -37,12 +38,16 @@ export interface IDocEncryption {
   columnOwnScope(colRef: number): string | null;
   /** Whether the user holds the current key of a scope. */
   canReadScope(scope: string): boolean;
+  /** Why the user can't change values of a data column (see ColumnPrivacy.whyCantEditValues()). */
+  whyCantEditValues(tableId: string, colId: string): "noAccess" | "usedByFrozen" | null;
   listMembers(): Promise<EncryptionMember[]>;
   getPendingMembers(): Promise<EncryptionMember[]>;
   grantPendingKeys(): Promise<KeyGrantResult>;
   getPendingEncryption(): Promise<Map<string, { canAccept: boolean }>>;
   acceptMember(email: string): Promise<void>;
   setReviewMembers(review: () => void): void;
+  /** Opens the sharing dialog (see setReviewMembers()). */
+  reviewMembers(): void;
   makeColumnPrivate(colRef: number, userIds: number[]): Promise<KeyGrantResult>;
   makeColumnPublic(colRef: number): Promise<void>;
   makeTablePrivate(tableRef: number, userIds: number[]): Promise<KeyGrantResult>;
@@ -65,6 +70,8 @@ export interface IDocEncryption {
   /** Publishes a form section as an encrypted form (see EncryptedForms.ts). */
   publishForm(sectionId: number): Promise<void>;
   unpublishForm(sectionId: number): Promise<void>;
+  /** Answers to a form waiting to be added, and why this member doesn't add them if it can't. */
+  getWaitingAnswers(sectionId: number): Promise<WaitingAnswers>;
   /** The link to a published form (including its link key). */
   getFormUrl(sectionId: number): string | null;
   /** The versions the document can be restored to, newest first. */
@@ -78,4 +85,13 @@ export interface IDocEncryption {
     onProgress: (fraction: number, step: string) => void): Promise<{ waitingMembers: string[] }>;
   /** Builds an Excel workbook in the browser: one sheet per [name, header, rows]. */
   exportXlsx(sheets: [string, string[], CellValue[][]][]): Promise<Uint8Array>;
+}
+
+export interface WaitingAnswers {
+  count: number;
+  more: boolean;          // There may be more than `count` (the server lists a limited number).
+  reason: "keys" | "blocked" | null;
+  // For "keys": the private tables and columns the member can't read (as members made them private).
+  missing?: { kind: "table" | "column", name: string }[];
+  message?: string;       // For "blocked": why adding them was refused.
 }

@@ -97,7 +97,14 @@ later by an owner (see below).
 - **Private tables** use column keys too: a table made private (table settings › Data › Privacy)
   has all its columns private with the table's key, including columns added later (its binding
   says the table: `colRef` holds minus the table's row id, see `tableTarget()`). A column of a
-  private table that is private itself needs both keys. The table's structure stays visible to all
+  private table can be restricted further, to some of the table's members ("Restrict to some of
+  them" in the column's settings): it's then private itself, and needs both keys; members removed
+  from the table are removed from such columns too. A private table shows a lock in its widgets'
+  titles, in the list of raw data, and next to the pages showing it (list of pages and top bar);
+  only columns with more restrictions than their table show one in their header (and none for
+  members who can't read the table at all). Members who lose access to values see them locked
+  right away; members given access to values they have locked are offered to reload, as such
+  values come with the document when opening it. The table's structure stays visible to all
   members (its name, its columns and their settings, its number of rows and their ids), and so do
   which of its cells are empty (see Limitations). New tables never get the id of a removed private
   table. When a document is encrypted, access rules hiding a whole table from some members make
@@ -223,7 +230,14 @@ and released if it goes away.
   rate). Browsers of members who can edit the document add them to it as a change that removes
   them from the inbox at the same time (so that they're added once). Forms can fill private
   columns: the form's private key is then sealed with those columns' keys, so that only members
-  who can read them can read (and add) the answers; others leave them waiting. Files attached in
+  who can read them can read (and add) the answers; others leave them waiting. Members who can
+  edit see, under the title of the form and of widgets of the table it fills (including the raw
+  data), how many answers are waiting, and why their browser doesn't add them (columns they can't
+  read, or a change refused, e.g. by a calculation they can't do, which is named); browsers
+  try again when their keys change. Questions can be
+  made private from the form's settings (Field › Privacy) too. When which columns a published form
+  fills are private changes (or their keys do), an owner's browser publishes it again, sealing its
+  private key anew (see `_syncForms()`). Files attached in
   answers are encrypted by respondents with keys of their own (carried in the encrypted answer),
   kept with the answer, and added as attachments (encrypted with their column's key). Formulas
   aren't in forms (as for regular documents), nor are values of private columns among the
@@ -252,6 +266,13 @@ need recomputing by someone who can read it), nor private settings (e.g. remove 
 saved filter of a private column: undoing it would need the filter). They get a message saying
 it must be changed by a member with access. Members who can read a column can set values shown
 locked (whose sealed value didn't check out) again.
+Which changes would change a formula's results follows the tables it can reach
+(`ColumnPrivacy._reach()`): the columns it names of its own table, of tables it names (lookups),
+and of tables reached through reference columns it names (`$Team.Budget`, `$group.Salary`). So a
+private formula `$Name + str($Pay)` in a table doesn't keep members from changing `Name` columns of
+other tables (e.g. adding form answers there). Rows can't be added to its own table and to tables
+it looks up, nor removed from any table it reaches; a formula naming a formula column of type Any
+(which may hold records of any table) is taken to reach every table.
 Formulas they can't compute are "frozen" in their engine, and keep the values computed by others.
 They can still save snapshots of the whole document: for the private values they can't read, the
 snapshot refers to the sealed values they received (`SealedCells.ts`), which they pass on without
@@ -263,7 +284,10 @@ Anything needing the server to read the data is hidden or refused (the client's 
 refuses, for these documents, any call sending or fetching their data, whatever the code path):
 
 - REST API data access, webhooks, triggers and automations, the document AI assistant (the
-  formula assistant works, see above), access rules, public sharing, and forks;
+  formula assistant works, see above), access rules with conditions, public sharing, and forks.
+  The "Access Rules" page explains instead how access works in an encrypted document (keys for
+  reading, roles for changing), lists private tables and columns with the members who can read
+  them (leading to their settings), and the kinds of rules that aren't available;
 - server-side downloads and exports (`.grist`): CSV, TSV and XLSX exports of widgets are made in
   the browser (XLSX with the data engine's own library);
 - imports through the server: files are imported in the browser instead (CSV, TSV, XLSX, JSON),

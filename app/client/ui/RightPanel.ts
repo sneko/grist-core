@@ -1125,6 +1125,13 @@ export class RightPanel extends Disposable {
               builder.buildFormConfigDom(),
             ),
           ]),
+          // For encrypted documents: who can read answers to this question.
+          this._gristDoc.docComm.encryption ? [
+            cssSeparator(),
+            cssSection(
+              dom.create(buildColumnPrivacySection, this._gristDoc, field.origCol.peek(), { isQuestion: true }),
+              testId("panel-question-privacy")),
+          ] : null,
         ];
       }),
 

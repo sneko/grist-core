@@ -3,6 +3,7 @@ import { buildDuplicatePageDialog } from "app/client/components/duplicatePage";
 import { GristDoc } from "app/client/components/GristDoc";
 import { fixOutlineOverflow } from "app/client/components/KeyboardFocusHighlighter";
 import { kbJumperAnchor } from "app/client/components/RegionFocusSwitcher";
+import { buildPrivatePageMarker } from "app/client/encryption/EncryptionUI";
 import { makeT } from "app/client/lib/localization";
 import { logTelemetryEvent } from "app/client/lib/telemetry";
 import { PageRec } from "app/client/models/DocModel";
@@ -103,6 +104,7 @@ function buildDomFromTable(
     onCollapseByDefault: value => pageRec.setAndSaveCollapsed(value),
     hasSubPages: () => item.children().get().length > 0,
     href: urlState().setLinkUrl({ docPage: viewId }),
+    afterName: dom.create(buildPrivatePageMarker, activeDoc, viewRec),
   };
 
   return buildPageDom(fromKo(pageName), options);

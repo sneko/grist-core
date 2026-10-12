@@ -134,7 +134,8 @@ describe("encryption/LocalActiveDoc", function() {
     for (const snapshot of relay.snapshots) {
       parts.push(await decryptSnapshot(keyring, snapshot.keyId, base64ToBytes(snapshot.payload)));
     }
-    return JSON.stringify(parts);
+    // (Without what's still encrypted, as random base64 text may contain what tests look for.)
+    return JSON.stringify(parts).replace(/"(data|check|wrappedKey)":"[^"]*"/g, "");
   }
 
   /**
@@ -153,6 +154,13 @@ describe("encryption/LocalActiveDoc", function() {
   function allPayloads(relay: MemoryRelay) {
     return [...relay.actions, ...relay.snapshots].map(r => Buffer.from(r.payload, "base64").toString("latin1"))
       .join("\n");
+  }
+
+  async function colRef(p: Participant, tableId: string, colId: string) {
+    const tables = await tableValues(p, "_grist_Tables");
+    const cols = await tableValues(p, "_grist_Tables_column");
+    const tableRef = tables[2][tables[3].tableId.indexOf(tableId)];
+    return cols[2].find((_, i) => cols[3].parentId[i] === tableRef && cols[3].colId[i] === colId)!;
   }
 
   describe("collaboration", function() {
@@ -662,6 +670,14 @@ describe("encryption/LocalActiveDoc", function() {
       assert.equal(relay.head, head);
       // Nothing changed locally either.
       assert.deepInclude((await tableValues(c, "Staff"))[3], { Bonus: [700, 900], Name: ["Anna", "Ben"] });
+      // The member's browser can tell before they even try.
+      const canUse = (p: Participant) => (s: string) => p.doc.keyring.canUseScope(s);
+      assert.equal(c.doc.privacy.whyCantEditValues("Staff", "Bonus", canUse(c)), "usedByFrozen");
+      assert.equal(c.doc.privacy.whyCantEditValues("Staff", "Salary", canUse(c)), "noAccess");
+      assert.equal(c.doc.privacy.whyCantEditValues("Staff", "Name", canUse(c)), null);
+      for (const colId of ["Bonus", "Salary", "Name"]) {
+        assert.equal(b.doc.privacy.whyCantEditValues("Staff", colId, canUse(b)), null);
+      }
     });
 
     it("updates private formulas for those who can read them", async function() {
@@ -781,10 +797,10 @@ describe("encryption/LocalActiveDoc", function() {
       assert.notEqual(newKey.keyId, oldKeyId);
       assert.isFalse(newKey.rotateOnNextEdit);
       assert.deepEqual(relay.wraps.filter(w => w.keyId === newKey.keyId).map(w => w.userId), [alice.userId]);
-      // Bob doesn't get the new value anymore.
+      // Bob doesn't get the new value anymore, and the values he had are shown locked too.
       await b.doc.sync();
       assert.deepInclude((await tableValues(b, "Staff"))[3], {
-        Salary: [LOCKED_CELL, 63000], Total: [LOCKED_CELL, 64000],
+        Salary: [LOCKED_CELL, LOCKED_CELL], Total: [LOCKED_CELL, LOCKED_CELL],
       });
       assert.deepInclude((await tableValues(a, "Staff"))[3], { Salary: [55000, 63000], Total: [55800, 64000] });
       // The document was saved again with the new key (as of the key change).
@@ -829,7 +845,7 @@ describe("encryption/LocalActiveDoc", function() {
     it("makes a private column public again, sharing its values", async function() {
       await b.doc.sync();
       // Bob lost access to Salary above.
-      assert.deepInclude((await tableValues(b, "Staff"))[3], { Salary: [LOCKED_CELL, 63000] });
+      assert.deepInclude((await tableValues(b, "Staff"))[3], { Salary: [LOCKED_CELL, LOCKED_CELL] });
       await a.doc.releaseScope(scope);
       await b.doc.sync();
       assert.deepEqual(b.doc.privacy.scopesOf("Staff", "Salary"), []);
@@ -914,6 +930,29 @@ describe("encryption/LocalActiveDoc", function() {
       assert.notInclude(await readableWithDocKey(relay), "Lyon");
     });
 
+    it("locks values a member had already received, once they can't read them", async function() {
+      await a.doc.applyUserActions([
+        ["AddTable", "Notes", [{ id: "Text", type: "Text", isFormula: false }]],
+        ["BulkAddRecord", "Notes", [null, null], { Text: ["hello", ""] }],
+      ]);
+      await c.doc.sync();
+      assert.deepEqual((await tableValues(c, "Notes"))[3].Text, ["hello", ""]);
+      const tables = await tableValues(a, "_grist_Tables");
+      const notesRef = tables[2][tables[3].tableId.indexOf("Notes")];
+      await a.doc.createScopeKey(makeColumnScope(), [alice, bob].map(m => ({ ...m, vaultUserId: vaultIdFor(m) })),
+        tableTarget(notesRef), { compact: true });
+      // Without reopening the document (empty values are given in clear: they stay).
+      await c.doc.sync();
+      assert.deepEqual((await tableValues(c, "Notes"))[3].Text, [LOCKED_CELL, ""]);
+      // The document shows it too (the order of rows is private too, as when reopening it).
+      assert.deepEqual(c.received[c.received.length - 1].docActions, [
+        ["BulkUpdateRecord", "Notes", [1, 2], { manualSort: [LOCKED_CELL, LOCKED_CELL] }],
+        ["BulkUpdateRecord", "Notes", [1], { Text: [LOCKED_CELL] }],
+      ]);
+      await b.doc.sync();
+      assert.deepEqual((await tableValues(b, "Notes"))[3].Text, ["hello", ""]);
+    });
+
     it("refuses changes to it from members without its key", async function() {
       await assert.isRejected(c.doc.applyUserActions([["UpdateRecord", "Staff", 1, { Salary: 1 }]]));
       await assert.isRejected(c.doc.applyUserActions([["AddRecord", "Staff", null, { Name: "Eve" }]]));
@@ -978,13 +1017,6 @@ describe("encryption/LocalActiveDoc", function() {
     let scope: string;
     let staffRef: number;
     let salaryRef: number;
-
-    async function colRef(p: Participant, tableId: string, colId: string) {
-      const tables = await tableValues(p, "_grist_Tables");
-      const cols = await tableValues(p, "_grist_Tables_column");
-      const tableRef = tables[2][tables[3].tableId.indexOf(tableId)];
-      return cols[2].find((_, i) => cols[3].parentId[i] === tableRef && cols[3].colId[i] === colId)!;
-    }
 
     async function syncAll() {
       for (const p of [a, b, c]) { await p.doc.sync(); }
@@ -1102,6 +1134,34 @@ describe("encryption/LocalActiveDoc", function() {
       await assert.isRejected(c.doc.applyUserActions([["RemoveColumn", "Staff", "Bonus"]]), /used by a calculation/);
       assert.equal(relay.head, head);
       assert.deepInclude((await tableValues(c, "Staff"))[3], { Bonus: [0, 0] });
+    });
+
+    it("refuses only changes to what these formulas can reach", async function() {
+      await a.doc.applyUserActions([
+        ["AddTable", "Visitors", [{ id: "Bonus", type: "Numeric", isFormula: false }]],
+        ["AddTable", "Rates", [{ id: "Rate", type: "Numeric", isFormula: false }]],
+        ["AddTable", "Teams", [{ id: "Budget", type: "Numeric", isFormula: false }]],
+        ["BulkAddRecord", "Teams", [null, null], { Budget: [10, 20] }],
+        ["AddColumn", "Staff", "Team", { type: "Ref:Teams", isFormula: false }],
+        ["AddColumn", "Staff", "Cost", { type: "Numeric", isFormula: true,
+          formula: "$Salary * Rates.lookupOne().Rate + $Team.Budget" }],
+      ]);
+      await syncAll();
+      const head = relay.head;
+      // Other tables' columns named like the ones Total uses ("Bonus"): fine.
+      await c.doc.applyUserActions([["AddRecord", "Visitors", null, { Bonus: 5 }]]);
+      await c.doc.applyUserActions([["RenameColumn", "Visitors", "Bonus", "Tip"]]);
+      // Tables Cost looks up: neither their columns it uses, nor their rows.
+      await assert.isRejected(c.doc.applyUserActions([["AddRecord", "Rates", null, { Rate: 2 }]]),
+        /used by a calculation.*\(Staff\.Cost\)/);
+      await assert.isRejected(c.doc.applyUserActions([["RenameColumn", "Rates", "Rate", "Ratio"]]),
+        /used by a calculation/);
+      // Tables it reaches through references: rows may be added, but not removed.
+      await c.doc.applyUserActions([["AddRecord", "Teams", null, { }]]);
+      await assert.isRejected(c.doc.applyUserActions([["UpdateRecord", "Teams", 1, { Budget: 15 }]]),
+        /used by a calculation/);
+      await assert.isRejected(c.doc.applyUserActions([["RemoveRecord", "Teams", 2]]), /used by a calculation/);
+      assert.equal(relay.head, head + 3);
     });
 
     it("doesn't give new columns the ids of removed private columns", async function() {
@@ -1566,6 +1626,38 @@ describe("encryption/LocalActiveDoc", function() {
       await b.doc.sync();
       const bRows = (await tableValues(b, "Contacts"))[3];
       assert.equal(bRows.Secret[bRows.Secret.length - 1], LOCKED_CELL);
+
+      // Once Bob can read Secret, he adds answers too.
+      await giveKeys(relay, secretScope, bob);
+      await b.doc.refreshKeys();
+      relay.inbox.push({ id: 11, formId: sealedKeys.formId, timeMs: Date.now(), payload: bytesToBase64(
+        await encryptFormAnswer(sealedKeys.publicKey, { v: 1, tableId: "Contacts",
+          colValues: { Name: "Uma", Secret: "also secret" } })) });
+      assert.equal(await b.doc.importFormAnswers(entries => readFormAnswers(b.doc.docData, b.doc.privacy, entries,
+        formHelpers(b))), 1);
+      const bRows2 = (await tableValues(b, "Contacts"))[3];
+      assert.equal(bRows2.Secret[bRows2.Secret.length - 1], "also secret");
+      leave(relay, b);
+    });
+
+    it("adds answers despite private formulas of other tables naming the same columns", async function() {
+      // A private formula of another table naming "Name" doesn't keep Bob from adding answers.
+      await a.doc.applyUserActions([["AddTable", "Payroll", [
+        { id: "Name", type: "Text", isFormula: false },
+        { id: "Pay", type: "Numeric", isFormula: false },
+        { id: "Line", type: "Any", isFormula: true, formula: "$Name + str($Pay)" },
+      ]]]);
+      await a.doc.createScopeKey(makeColumnScope(), [{ ...alice, vaultUserId: vaultIdFor(alice) }],
+        await colRef(a, "Payroll", "Pay"));
+      await a.doc.applyUserActions([["UpdateRecord", "_grist_Views_section", sectionId, {
+        shareOptions: JSON.stringify({ form: true, publish: true, encryptedForm: keys }),
+      }]]);
+      const b = await join(relay, bob);
+      relay.inbox.push({ id: 20, formId: keys.formId, timeMs: 0, payload: bytesToBase64(await encryptFormAnswer(
+        keys.publicKey, { v: 1, tableId: "Contacts", colValues: { Name: "Tess", Age: 40 } })) });
+      assert.equal(await b.doc.importFormAnswers(entries => readFormAnswers(b.doc.docData, b.doc.privacy, entries,
+        formHelpers(b))), 1);
+      assert.include((await tableValues(b, "Contacts"))[3].Name, "Tess");
       leave(relay, b);
     });
 

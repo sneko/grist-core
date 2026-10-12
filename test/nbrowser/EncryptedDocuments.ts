@@ -80,7 +80,8 @@ describe("EncryptedDocuments", function() {
     const parts: unknown[] = [];
     for (const a of actions) { parts.push(await decryptBundle(keyring, a.keyId, a.payload)); }
     for (const s of snapshots) { parts.push(await decryptSnapshot(keyring, s.keyId, s.payload)); }
-    return JSON.stringify(parts);
+    // (Without what's still encrypted, as random base64 text may contain what tests look for.)
+    return JSON.stringify(parts).replace(/"(data|check|wrappedKey)":"[^"]*"/g, "");
   }
 
   async function allStoredText(docId: string): Promise<string> {
@@ -211,8 +212,10 @@ describe("EncryptedDocuments", function() {
     });
 
     it("hides what the server can't do for encrypted documents", async function() {
-      // No access rules, nor automations (they would need the server to read the data).
-      assert.isFalse(await driver.find(".test-tools-access-rules").isPresent());
+      // No automations (they would need the server to read the data). Access rules only explain
+      // how access works (see "explains access on the Access Rules page").
+      assert.isFalse(await driver.find(".test-tools-automations").isPresent());
+      assert.isFalse(await driver.find(".test-tools-access-rules-trigger").isPresent());
       // Sharing: no server-side copies nor downloads, but copies and exports made by the browser.
       await driver.find(".test-tb-share").click();
       const menu = await driver.findWait(".grist-floating-menu", 2000).getText();
@@ -352,13 +355,24 @@ describe("EncryptedDocuments", function() {
     });
 
     it("refuses edits needing a calculation the member can't do", async function() {
-      // Bonus is used by Total, which uses Salary: this member can't recompute it.
+      // Bonus is used by Total, which uses Salary: this member can't recompute it. They're told
+      // so as they start typing, and its cells show it, as locked ones do.
+      assert.equal(await gu.getCell({ col: "Bonus", rowNum: 1 }).getCssValue("cursor"), "not-allowed");
+      assert.notEqual(await gu.getCell({ col: "Name", rowNum: 1 }).getCssValue("cursor"), "not-allowed");
       await gu.wipeToasts();
       await gu.getCell({ col: "Bonus", rowNum: 1 }).click();
-      await gu.enterCell("1000");
+      await driver.sendKeys("1");
       await gu.waitToPass(async () => {
         assert.match((await gu.getToasts()).join("\n"),
           /used by a calculation you don't have access to.*has to be changed by a member/s);
+      }, 5000);
+      assert.isFalse(await driver.find(".cell_editor").isPresent());
+      assert.equal(await gu.getCell({ col: "Bonus", rowNum: 1 }).getText(), "700");
+      // Changes made without the editor (e.g. pasting, clearing) are refused all the same.
+      await gu.wipeToasts();
+      await driver.sendKeys(Key.DELETE);
+      await gu.waitToPass(async () => {
+        assert.match((await gu.getToasts()).join("\n"), /used by a calculation you don't have access to/);
       }, 5000);
       assert.equal(await gu.getCell({ col: "Bonus", rowNum: 1 }).getText(), "700");
 
@@ -429,6 +443,13 @@ describe("EncryptedDocuments", function() {
           { id: "Amount", type: "Numeric", isFormula: false }]],
         ["BulkAddRecord", "Payroll", [null, null], { Who: ["Ana", "Ben"], Amount: [3100, 4200] }],
       ]);
+      // The other member sees it while it isn't private yet.
+      await switchTo(otherWindow);
+      await gu.openPage("Payroll");
+      await gu.waitToPass(async () => {
+        assert.equal(await gu.getCell({ col: "Who", rowNum: 1 }).getText(), "Ana");
+      }, 10000);
+      await switchTo(ownerWindow);
       await gu.openPage("Payroll");
       await gu.openWidgetPanel("data");
       for (const close of await driver.findAll(".test-notifier-toast-close")) { await close.click(); }
@@ -443,29 +464,198 @@ describe("EncryptedDocuments", function() {
         ["UpdateRecord", "Payroll", 1, { Note: "raise" }]]);
       await gu.openColumnPanel("Note");
       await driver.findWait(".test-column-private-table", 5000);
+      // The table shows a lock in its title, rather than one on each column, and so does its page
+      // (in the list of pages, and next to its name at the top).
+      assert.isTrue(await driver.find(".test-table-private-marker").isDisplayed());
+      assert.lengthOf(await driver.findAll(".test-column-private-marker"), 0);
+      const pagesWithLock = await driver.findAll(".test-treeview-itemHeader", async e =>
+        (await e.find(".test-page-private-marker").isPresent()) ? e.find(".test-docpage-label").getText() : null);
+      assert.deepEqual(pagesWithLock.filter(Boolean), ["Payroll"]);
+      assert.lengthOf(await driver.findAll(".test-page-private-marker"), 2);
+
+      // A column of it can be restricted further, to some of the table's members (here, the owner
+      // alone): only that column gets a lock.
+      await gu.wipeToasts();
+      await driver.find(".test-column-make-private").click();
+      await driver.findWait(".test-modal-dialog", 2000);
+      await gu.waitToPass(async () => {
+        assert.deepEqual(await driver.findAll(".test-modal-dialog label", e => e.getText()),
+          [`${editor.name} (${editor.email})`]);
+      }, 5000);
+      await driver.find(".test-modal-confirm").click();
+      await driver.findWait(".test-column-private-in-table", 10000);
+      await gu.waitToPass(async () => {
+        assert.deepEqual(await driver.findAll(".test-column-private-marker",
+          e => e.findClosest(".column_name").getText()), ["Note"]);
+      }, 5000);
 
       await switchTo(editorWindow);
       await gu.openPage("Payroll");
       await gu.waitToPass(async () => {
         assert.deepEqual(await gu.getVisibleGridCells({ cols: ["Who", "Amount", "Note"], rowNums: [1] }),
-          ["Ana", "3100", "raise"]);
+          ["Ana", "3100", "🔒"]);
       }, 10000);
-      // The other member gets new values locked; what they already had stays in the document they
-      // have open, but once they open it again, they can't read any of it.
+      // The other member sees it locked right away (values they had received before included),
+      // and still after opening it again.
       await switchTo(otherWindow);
       await gu.openPage("Payroll");
       await gu.waitToPass(async () => {
-        assert.equal(await gu.getCell({ col: "Note", rowNum: 1 }).getText(), "🔒");
+        assert.deepEqual(await gu.getVisibleGridCells({ cols: ["Who", "Amount", "Note"], rowNums: [1, 2] }),
+          ["🔒", "🔒", "🔒", "🔒", "🔒", ""]);
       }, 10000);
+      // Their columns have no lock of their own: all of the table is locked for them alike.
+      assert.lengthOf(await driver.findAll(".test-column-private-marker"), 0);
+      assert.notMatch((await gu.getToasts()).join("\n"), /given access/);
       await driver.navigate().refresh();
       await gu.waitForDocToLoad(ENGINE_LOAD_MS);
       await gu.openPage("Payroll");
+      // (Making Note private saved its values encrypted, including empty ones.)
       assert.deepEqual(await gu.getVisibleGridCells({ cols: ["Who", "Amount", "Note"], rowNums: [1, 2] }),
-        ["🔒", "🔒", "🔒", "🔒", "🔒", ""]);
+        ["🔒", "🔒", "🔒", "🔒", "🔒", "🔒"]);
       const readable = await readableWithDocKeys(docId);
       for (const secret of ["3100", "4200", "raise"]) {
         assert.notInclude(readable, secret);
       }
+    });
+
+    it("explains access on the Access Rules page", async function() {
+      // Members see private tables and columns, with who can read them.
+      await switchTo(otherWindow);
+      await driver.find(".test-tools-access-rules").click();
+      await driver.findWait(".test-acl-encrypted", 5000);
+      assert.match(await driver.find(".test-acl-encrypted").getText(), /server can't read its data/);
+      await driver.findContentWait(".test-acl-encrypted-target", /^Payroll$/, 5000);
+      assert.lengthOf(await driver.findAll(".test-acl-encrypted-no-access"), 2);
+      assert.isFalse(await driver.find(".test-acl-encrypted-settings").isPresent());
+
+      // Owners also see the members who can read, and get to the settings.
+      await switchTo(ownerWindow);
+      await driver.find(".test-tools-access-rules").click();
+      await driver.findContentWait(".test-acl-encrypted-target", /^Payroll$/, 5000);
+      await gu.waitToPass(async () => {
+        // (Those of the table, and those of its restricted column.)
+        assert.deepEqual((await driver.findAll(".test-acl-encrypted-member", e => e.getText())).sort(),
+          ["Chimpy (you)", "Chimpy (you)", editor.name].sort());
+      }, 5000);
+      assert.isTrue(await driver.find(".test-acl-encrypted-settings").isPresent());
+      await driver.find(".test-acl-encrypted-open").click();
+      await driver.findWait(".test-table-private", 5000);
+      await driver.find(".test-raw-data-close-button").click();
+      await gu.waitToPass(async () => assert.isFalse(await driver.find(".test-raw-data-close-button").isPresent()));
+
+      // A private column is listed too, and leads to the column's settings.
+      await gu.openPage("Staff");
+      await gu.openColumnPanel("Salary");
+      for (const close of await driver.findAll(".test-notifier-toast-close")) { await close.click(); }
+      await driver.findWait(".test-column-make-private", 5000).click();
+      await driver.find(".test-modal-confirm").click();
+      await driver.findWait(".test-column-private", 10000);
+      await driver.find(".test-tools-access-rules").click();
+      await driver.findContentWait(".test-acl-encrypted-target", /^Staff › Salary$/, 5000);
+      assert.deepEqual(await driver.findAll(".test-acl-encrypted-target", e => e.getText()),
+        ["Payroll", "Payroll › Note", "Staff › Salary"]);
+      await driver.findAll(".test-acl-encrypted-open").then(opens => opens[2].click());
+      await driver.findWait(".test-column-private", 5000);
+      assert.equal(await driver.find(".test-field-label").value(), "Salary");
+      await driver.find(".test-raw-data-close-button").click();
+    });
+
+    it("removes members from a table's restricted columns along with the table", async function() {
+      await switchTo(ownerWindow);
+      await gu.openPage("Payroll");
+      // The editor gets the restricted Note column too.
+      await gu.openColumnPanel("Note");
+      await gu.wipeToasts();
+      await driver.findWait(".test-column-change-audience", 5000).click();
+      await driver.findContentWait(".test-modal-dialog label", new RegExp(`^${editor.name} `), 5000).click();
+      await driver.find(".test-modal-confirm").click();
+      await gu.waitToPass(async () => {
+        assert.sameMembers(await driver.findAll(".test-column-audience-member", e => e.getText()),
+          ["Chimpy (you)", editor.name]);
+      }, 10000);
+      // They're told, and see it once they reload (values they had locked come with the document).
+      await switchTo(editorWindow);
+      await gu.waitToPass(async () => {
+        assert.match((await gu.getToasts()).join("\n"), /given access to more of this document/);
+      }, 10000);
+      assert.isTrue(await driver.findContent(".test-notifier-toast-custom-action", /Reload to see it/).isDisplayed());
+      // (Reloading as the editor: windows share their login with the last one opened.)
+      const session = await gu.session().user("user2").teamSite.addLogin();
+      await session.loadDoc(`/doc/${docId}`, { wait: false });
+      await gu.waitForDocToLoad(ENGINE_LOAD_MS);
+      await gu.openPage("Payroll");
+      await gu.waitToPass(async () => {
+        assert.equal(await gu.getCell({ col: "Note", rowNum: 1 }).getText(), "raise");
+      }, 10000);
+
+      // Removed from the table, they lose its restricted column too, and see it all locked.
+      await switchTo(ownerWindow);
+      await gu.openWidgetPanel("data");
+      await gu.wipeToasts();
+      await driver.findWait(".test-table-change-audience", 5000).click();
+      await driver.findContentWait(".test-modal-dialog label", new RegExp(`^${editor.name} `), 5000).click();
+      await driver.find(".test-modal-confirm").click();
+      await gu.waitToPass(async () => {
+        assert.deepEqual(await driver.findAll(".test-table-audience-member", e => e.getText()), ["Chimpy (you)"]);
+      }, 10000);
+      await gu.openColumnPanel("Note");
+      await gu.waitToPass(async () => {
+        assert.deepEqual(await driver.findAll(".test-column-audience-member", e => e.getText()), ["Chimpy (you)"]);
+      }, 10000);
+      await switchTo(editorWindow);
+      await gu.waitToPass(async () => {
+        assert.deepEqual(await gu.getVisibleGridCells({ cols: ["Who", "Amount", "Note"], rowNums: [1] }),
+          ["🔒", "🔒", "🔒"]);
+      }, 10000);
+    });
+
+    it("shows answers to forms waiting for a member who can read their private columns", async function() {
+      // The owner publishes a form filling Salary (private to them), then closes the document.
+      await switchTo(ownerWindow);
+      await gu.openPage("Staff");
+      await gu.addNewSection("Form", "Staff");
+      await driver.findWait(".test-forms-publish", 5000).click();
+      if (await driver.find(".test-modal-confirm").isPresent()) { await driver.find(".test-modal-confirm").click(); }
+      await gu.waitForServer();
+      const shareButton = await driver.findWait(".test-forms-share", 5000);
+      await gu.scrollIntoView(shareButton);
+      await shareButton.click();
+      const formUrl = await driver.findWait(".test-forms-link", 5000).getAttribute("value");
+      await gu.sendKeys(Key.ESCAPE);
+      await driver.get("about:blank");
+
+      await gu.onNewTab(async () => {
+        await driver.get(formUrl);
+        await driver.findWait('input[name="Name"]', 10000).click();
+        await gu.sendKeys("Cleo");
+        await driver.find('input[name="Salary"]').click();
+        await gu.sendKeys("48000");
+        await driver.find('button[type="submit"]').click();
+        await driver.findWait(".test-form-success-page", 10000);
+      });
+
+      // The editor can't read Salary: their browser leaves the answer, and says why.
+      await switchTo(editorWindow);
+      await gu.openPage("Staff");
+      // On the form, and on the table it fills.
+      await gu.waitToPass(async () => {
+        assert.deepEqual(await driver.findAll(".test-waiting-answers", e => e.getText()), [
+          "1 form answer is waiting. Only editors or owners with access to the column Staff › Salary can add it.",
+          "1 form answer is waiting. Only editors or owners with access to the column Staff › Salary can add it.",
+        ]);
+      }, 10000);
+
+      // Once the owner opens the document, their browser adds it.
+      await switchTo(ownerWindow);
+      const session = await gu.session().user("user1").teamSite.addLogin();
+      await session.loadDoc(`/doc/${docId}`, { wait: false });
+      await gu.waitForDocToLoad(ENGINE_LOAD_MS);
+      await switchTo(editorWindow);
+      await gu.waitToPass(async () => {
+        assert.isFalse(await driver.find(".test-waiting-answers").isPresent());
+        assert.include(await gu.getVisibleGridCells({ section: "STAFF", cols: ["Name"], rowNums: [1, 2, 3] }),
+          "Cleo");
+      }, 20000);
     });
   });
 
@@ -608,6 +798,40 @@ describe("EncryptedDocuments", function() {
           ["alpha", "beta", "from the form"]);
       }, 20000);
       assert.notInclude(await allStoredText(docId), "from the form");
+
+      // A question can be made private from the form: respondents still answer it, and the form
+      // follows (it's published again), but only members who can read it get the answers.
+      // (Document history was left open in the right panel.)
+      if (await driver.find(".test-right-tool-close").isPresent()) {
+        await driver.find(".test-right-tool-close").click();
+      }
+      await driver.findContent(".active_section .test-forms-label", /^C\*?$/).click();
+      await gu.openColumnPanel();
+      await gu.wipeToasts();
+      await driver.findWait(".test-panel-question-privacy .test-column-make-private", 5000).click();
+      await driver.findWait(".test-modal-confirm", 2000).click();
+      await driver.findWait(".test-question-private", 10000);
+      await gu.onNewTab(async () => {
+        await gu.waitToPass(async () => {
+          await driver.get(formUrl);
+          await driver.findWait('input[name="C"]', 5000);
+        }, 20000);
+        await driver.find('input[name="A"]').click();
+        await gu.sendKeys("second");
+        await driver.find('input[name="C"]').click();
+        await gu.sendKeys("private answer");
+        await driver.find('button[type="submit"]').click();
+        await driver.findWait(".test-form-success-page", 10000);
+      });
+      await gu.waitToPass(async () => {
+        assert.deepEqual(await gu.getVisibleGridCells({ section: "TABLE1", cols: ["A", "C"], rowNums: [4] }),
+          ["second", "private answer"]);
+      }, 20000);
+      assert.notInclude(await readableWithDocKeys(docId), "private answer");
+      // (Back to how it was, for what follows.)
+      await driver.findContent(".active_section .test-forms-label", /^C\*?$/).click();
+      await driver.findWait(".test-panel-question-privacy .test-column-make-public", 5000).click();
+      await gu.waitForServer();
     });
 
     it("makes an encrypted document regular again", async function() {
@@ -618,7 +842,8 @@ describe("EncryptedDocuments", function() {
       await gu.waitToPass(async () => {
         assert.isNull((await ownerApi.getDoc(docId)).options?.encryption ?? null);
       }, 30000);
-      assert.deepEqual((await ownerApi.getDocAPI(docId).getRows("Table1")).A, ["alpha", "beta", "from the form"]);
+      assert.deepEqual((await ownerApi.getDocAPI(docId).getRows("Table1")).A,
+        ["alpha", "beta", "from the form", "second"]);
       // It reopens as a regular document.
       await gu.waitToPass(async () => {
         assert.isTrue(await driver.find(".test-encryption-encrypt").isDisplayed());

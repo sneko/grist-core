@@ -28,7 +28,10 @@
  * Which formulas read which columns is found by looking for column names in formulas. This errs
  * on the side of caution: a formula mentioning a name used by a private column (even of another
  * table) counts as reading it. Formulas can't read columns without naming them: the data engine
- * refuses it (see ScopeMonitor in sandbox/grist/direct_sandbox.py), with the same scopes.
+ * refuses it (see ScopeMonitor in sandbox/grist/direct_sandbox.py), with the same scopes. Which
+ * changes would change the results of formulas a member can't compute is found more precisely,
+ * following the tables formulas can reach (see _reach()): otherwise a private formula naming a
+ * common column name (e.g. "Name") would keep members from changing that column in every table.
  *
  * Browsers check that changes they receive seal what must be, with the right keys (see
  * checkSealing()), and skip those that don't: a member without a column's key can't write values
@@ -45,7 +48,7 @@ import { base64ToBytes, bytesToBase64 } from "app/common/encryption/EncryptionCr
 import { isColumnScope, tableTarget } from "app/common/encryption/EncryptionTypes";
 import { Keyring, MissingKeyError } from "app/common/encryption/Keyring";
 import { isLockedCell, LOCKED_CELL } from "app/common/encryption/LockedCell";
-import { getDefaultForType } from "app/common/gristTypes";
+import { getDefaultForType, getReferencedTableId } from "app/common/gristTypes";
 
 import isEqual from "lodash/isEqual";
 
@@ -69,6 +72,13 @@ interface ColumnInfo {
   // The scopes of the column's own data: its own, and its table's if the table is private.
   ownScopes: string[];
   sourceRef: number;        // For group-by columns of summary tables: the source column.
+}
+
+// What a formula's results may depend on (see ColumnPrivacy._reach()).
+interface Reach {
+  cols: Set<string>;        // "tableId.colId" of the columns it may read.
+  tables: Set<string>;      // The tables it may read columns of.
+  rowTables: Set<string>;   // The tables whose rows (which there are) it may depend on.
 }
 
 const DATA_ACTIONS = new Set([
@@ -117,10 +127,14 @@ export class ColumnPrivacy {
   private _byKey = new Map<string, ColumnInfo>();
   private _byColId = new Map<string, ColumnInfo[]>();
   private _tokens = new Map<ColumnInfo, Set<string>>();
+  private _byTable = new Map<string, ColumnInfo[]>();
+  private _reaches = new Map<ColumnInfo, Reach>();
 
   constructor(private _cols: ColumnInfo[]) {
     for (const col of _cols) {
       this._byRef.set(col.colRef, col);
+      const ofTable = this._byTable.get(col.tableId);
+      if (ofTable) { ofTable.push(col); } else { this._byTable.set(col.tableId, [col]); }
       this._byKey.set(key(col.tableId, col.colId), col);
       const sameId = this._byColId.get(col.colId);
       if (sameId) { sameId.push(col); } else { this._byColId.set(col.colId, [col]); }
@@ -194,6 +208,18 @@ export class ColumnPrivacy {
   }
 
   /**
+   * Why the member can't change values of a data column (null if they can), to tell them before
+   * they try (checkChange() refuses such changes).
+   */
+  public whyCantEditValues(tableId: string, colId: string,
+    canUseScope: (scope: string) => boolean): "noAccess" | "usedByFrozen" | null {
+    if (!this.hasProtectedColumns()) { return null; }
+    if (!this.scopesOf(tableId, colId).every(canUseScope)) { return "noAccess"; }
+    if (this._frozen(canUseScope).some(c => this._reach(c).cols.has(key(tableId, colId)))) { return "usedByFrozen"; }
+    return null;
+  }
+
+  /**
    * Checks that the member may make a change (given as the doc actions their engine produced),
    * throwing EncryptionAccessError if not.
    */
@@ -202,19 +228,21 @@ export class ColumnPrivacy {
     const isReadable = (tableId: string, colId: string) => this.scopesOf(tableId, colId).every(canUseScope);
     const frozen = this._frozen(canUseScope);
     if (this._cols.every(c => isReadable(c.tableId, c.colId))) { return; }
-    const frozenTokens = new Set(frozen.flatMap(c => [...(this._tokens.get(c) || [])]));
-    const frozenTables = new Set(frozen.map(c => c.tableId));
-    // Whether changing a column (or table) would change what formulas the member can't compute.
-    const isUsedByFrozen = (tableId: string, colId?: string) =>
-      frozenTokens.has(tableId) || (colId !== undefined && frozenTokens.has(colId));
+    // The formula the member can't compute that changing a column, a table, or its rows would
+    // change the results of, if any.
+    const reaches = frozen.map(c => ({ col: c, reach: this._reach(c) }));
+    const frozenUsingCol = (tableId: string, colId: string) =>
+      reaches.find(r => r.reach.cols.has(key(tableId, colId)))?.col;
+    const frozenUsingTable = (tableId: string) => reaches.find(r => r.reach.tables.has(tableId))?.col;
+    const frozenUsingRows = (tableId: string) => reaches.find(r => r.reach.rowTables.has(tableId))?.col;
     const mentionsUnreadable = (formula: unknown) => {
       if (!formula || typeof formula !== "string") { return false; }
       const tokens = getTokens(formula);
       return this._cols.some(c => !isReadable(c.tableId, c.colId) && tokens.has(c.colId));
     };
-    const usedByFrozenError = () => new EncryptionAccessError(
+    const usedByFrozenError = (by: ColumnInfo) => new EncryptionAccessError(
       "This is used by a calculation you don't have access to: it has to be changed by a member who " +
-      "can read the private columns it uses");
+      `can read the private columns it uses (${by.tableId}.${by.colId})`);
 
     for (const action of actions) {
       const [name, tableId] = action as [string, string];
@@ -226,9 +254,9 @@ export class ColumnPrivacy {
           if (col && !isReadable(col.tableId, col.colId)) {
             throw new EncryptionAccessError("Only members who can read a private column can change it");
           }
-          if (col && isUsedByFrozen(col.tableId, col.colId) &&
-            (ROW_SET_ACTIONS.has(name) || COLUMN_DEFINITION_FIELDS.some(f => f in values))) {
-            throw usedByFrozenError();
+          const by = col && frozenUsingCol(col.tableId, col.colId);
+          if (by && (ROW_SET_ACTIONS.has(name) || COLUMN_DEFINITION_FIELDS.some(f => f in values))) {
+            throw usedByFrozenError(by);
           }
         }
         const formulas = Array.isArray(values.formula) ? values.formula : [values.formula];
@@ -243,7 +271,8 @@ export class ColumnPrivacy {
         if (name === "ModifyColumn" && !isReadable(tableId, colId)) {
           throw new EncryptionAccessError("Only members who can read a private column can change it");
         }
-        if (name === "ModifyColumn" && isUsedByFrozen(tableId, colId)) { throw usedByFrozenError(); }
+        const by = name === "ModifyColumn" && frozenUsingCol(tableId, colId);
+        if (by) { throw usedByFrozenError(by); }
         if (mentionsUnreadable((action as any)[3]?.formula)) {
           throw new EncryptionAccessError("You can't use private columns you don't have access to in formulas");
         }
@@ -253,34 +282,74 @@ export class ColumnPrivacy {
         if (!isReadable(tableId, action[2] as string)) {
           throw new EncryptionAccessError("Only members who can read a private column can change it");
         }
-        if (isUsedByFrozen(tableId, action[2] as string)) { throw usedByFrozenError(); }
+        const by = frozenUsingCol(tableId, action[2] as string);
+        if (by) { throw usedByFrozenError(by); }
         continue;
       }
       if (name === "RemoveTable" || name === "RenameTable") {
         if (this._cols.some(c => c.tableId === tableId && !isReadable(c.tableId, c.colId))) {
           throw new EncryptionAccessError("This table has private columns you don't have access to");
         }
-        if (isUsedByFrozen(tableId) || frozenTables.has(tableId)) { throw usedByFrozenError(); }
+        const by = frozenUsingTable(tableId);
+        if (by) { throw usedByFrozenError(by); }
         continue;
       }
       if (!DATA_ACTIONS.has(name)) { continue; }
       for (const colId of Object.keys((action as any)[3] || {})) {
         if (colId === "manualSort") { continue; }
         if (!isReadable(tableId, colId)) {
-          throw new EncryptionAccessError("You don't have access to this private column");
+          throw new EncryptionAccessError(NO_ACCESS_MESSAGE);
         }
-        if (frozenTokens.has(colId)) {
-          throw new EncryptionAccessError(
-            "This value is used by a calculation you don't have access to: it has to be changed " +
-            "by a member who can read the private columns it uses");
-        }
+        const by = frozenUsingCol(tableId, colId);
+        if (by) { throw new EncryptionAccessError(`${USED_BY_FROZEN_MESSAGE} (${by.tableId}.${by.colId})`); }
       }
-      if (ROW_SET_ACTIONS.has(name) && (frozenTables.has(tableId) || frozenTokens.has(tableId))) {
+      // (Removing rows also empties references to them.)
+      const by = ROW_SET_ACTIONS.has(name) &&
+        (name.includes("Add") ? frozenUsingRows(tableId) : frozenUsingTable(tableId));
+      if (by) {
         throw new EncryptionAccessError(
           "Rows of this table are used by a calculation you don't have access to: they have to be " +
-          "added or removed by a member who can read the private columns it uses");
+          `added or removed by a member who can read the private columns it uses (${by.tableId}.${by.colId})`);
       }
     }
+  }
+
+  /**
+   * What a formula may read, to refuse changes that would change the results of formulas members
+   * can't compute: the columns it names, of its own table, of tables it names (lookups), and of
+   * tables it reaches through reference columns it names ($ref.Col, $group.Col in summaries). It
+   * may depend on which rows there are in its own table, in tables it names, and in tables of
+   * reference lists computed by formulas it names ($group). A formula naming a formula column of
+   * type Any (whose values may be records of any table) is taken to reach every table.
+   */
+  private _reach(col: ColumnInfo): Reach {
+    const cached = this._reaches.get(col);
+    if (cached) { return cached; }
+    const tokens = this._tokens.get(col) || new Set<string>();
+    const tables = new Set([col.tableId, ...[...tokens].filter(t => this._byTable.has(t))]);
+    const rowTables = new Set(tables);
+    let everywhere = false;
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const tableId of [...tables]) {
+        for (const other of this._byTable.get(tableId) || []) {
+          if (other === col || !tokens.has(other.colId)) { continue; }
+          if (other.type === "Any" && other.isFormula && other.formula) { everywhere = true; }
+          const target = getReferencedTableId(other.type);
+          if (!target) { continue; }
+          if (other.isFormula && other.type.startsWith("RefList:")) { rowTables.add(target); }
+          if (!tables.has(target)) { tables.add(target); changed = true; }
+        }
+      }
+    }
+    if (everywhere) {
+      for (const tableId of this._byTable.keys()) { tables.add(tableId); rowTables.add(tableId); }
+    }
+    const cols = new Set(this._cols.filter(c => c !== col && tables.has(c.tableId) && tokens.has(c.colId))
+      .map(c => key(c.tableId, c.colId)));
+    const reach = { cols, tables, rowTables };
+    this._reaches.set(col, reach);
+    return reach;
   }
 
   private _frozen(canUseScope: (scope: string) => boolean): ColumnInfo[] {
@@ -288,6 +357,10 @@ export class ColumnPrivacy {
       !this.scopesOf(c.tableId, c.colId).every(canUseScope));
   }
 }
+
+const NO_ACCESS_MESSAGE = "You don't have access to this private column";
+const USED_BY_FROZEN_MESSAGE = "This value is used by a calculation you don't have access to: it has to be " +
+  "changed by a member who can read the private columns it uses";
 
 /**
  * The privacy of columns for a change: a change may make columns private or not, or rename

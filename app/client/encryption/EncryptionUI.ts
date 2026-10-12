@@ -15,7 +15,7 @@ import { SectionItem } from "app/client/ui/SettingsLayout";
 import { hoverTooltip } from "app/client/ui/tooltips";
 import { basicButton, primaryButton, textButton } from "app/client/ui2018/buttons";
 import { labeledSquareCheckbox } from "app/client/ui2018/checkbox";
-import { testId, theme } from "app/client/ui2018/cssVars";
+import { colors, testId, theme } from "app/client/ui2018/cssVars";
 import { icon } from "app/client/ui2018/icons";
 import { confirmModal, cssModalBody, cssModalButtons, cssModalTitle, modal, saveModal } from "app/client/ui2018/modals";
 import { UserAction } from "app/common/DocActions";
@@ -28,9 +28,10 @@ import { Computed, dom, DomContents, MultiHolder, Observable, styled } from "gra
 
 import type { GristDoc } from "app/client/components/GristDoc";
 import type { EncryptionSummary } from "app/client/encryption/DocConversion";
-import type { IDocEncryption, KeyGrantResult } from "app/client/encryption/types";
+import type { IDocEncryption, KeyGrantResult, WaitingAnswers } from "app/client/encryption/types";
 import type { ColumnRec } from "app/client/models/entities/ColumnRec";
 import type { TableRec } from "app/client/models/entities/TableRec";
+import type { ViewRec } from "app/client/models/entities/ViewRec";
 import type { IKeyVault } from "app/common/encryption/EncryptionCrypto";
 
 const t = makeT("EncryptionUI");
@@ -50,7 +51,8 @@ function keysVersion(owner: MultiHolder, encryption: IDocEncryption): Observable
  * The "Private column" section of a column's settings: who can read the column, and (for owners)
  * the controls to change it.
  */
-export function buildColumnPrivacySection(owner: MultiHolder, gristDoc: GristDoc, column: ColumnRec): DomContents {
+export function buildColumnPrivacySection(owner: MultiHolder, gristDoc: GristDoc, column: ColumnRec,
+  options: { isQuestion?: boolean } = {}): DomContents {
   const encryption = getEncryption(gristDoc);
   if (!encryption) { return null; }
   const version = keysVersion(owner, encryption);
@@ -67,38 +69,54 @@ export function buildColumnPrivacySection(owner: MultiHolder, gristDoc: GristDoc
         ownScope: encryption.columnOwnScope(colRef),
         tableScope: tableRef ? encryption.tableScope(tableRef) : null,
       };
-    }, ({ scopes, colRef, ownScope, tableScope }) => {
-      if (!colRef) { return null; }
-      if (scopes.length === 0) {
-        return [
-          cssHint(t("All members of the document can read this column.")),
-          encryption.isOwner ? cssRow(
-            textButton(t("Make private"),
-              dom.on("click", () => editAudience(encryption, { kind: "column", ref: colRef, scope: null })),
-              testId("column-make-private")),
-          ) : null,
-        ];
-      }
-      // A column of a private table (without a scope of its own) is managed with its table.
-      if (!ownScope && tableScope) {
-        return [
-          buildPrivacyStatus(encryption, "table", tableScope),
-          cssHint(t("It's in a private table: who can read it is set in the table's settings (Data tab)."),
-            testId("column-private-table")),
-        ];
-      }
-      if (!ownScope) {
-        return cssHintWithIcon(cssHintIcon("Lock"),
-          dom("div", t("This formula uses private columns: only members who can read them can see its results.")),
-          testId("column-private-derived"));
-      }
-      return [
-        buildPrivateTarget(encryption, { kind: "column", ref: colRef, scope: ownScope }),
-        // (Then reading it takes both keys.)
-        tableScope ? cssHint(t("It's also in a private table: only members who can read both can read it."),
-          testId("column-private-in-table")) : null,
-      ];
-    }),
+    }, ({ scopes, colRef, ownScope, tableScope }) => [
+      buildColumnPrivacy(encryption, { scopes, colRef, ownScope, tableScope }),
+      // (Forms of encrypted documents encrypt answers for those who can read them.)
+      (options.isQuestion && colRef && scopes.length > 0) ?
+        cssHint(t("Respondents can still answer it: only members who can read this column can read their answers."),
+          testId("question-private")) : null,
+    ]),
+  ];
+}
+
+function buildColumnPrivacy(encryption: IDocEncryption, { scopes, colRef, ownScope, tableScope }: {
+  scopes: string[], colRef: number, ownScope: string | null, tableScope: string | null,
+}): DomContents {
+  if (!colRef) { return null; }
+  if (scopes.length === 0) {
+    return [
+      cssHint(t("All members of the document have access to this column.")),
+      encryption.isOwner ? cssRow(
+        textButton(t("Make private"),
+          dom.on("click", () => editAudience(encryption, { kind: "column", ref: colRef, scope: null })),
+          testId("column-make-private")),
+      ) : null,
+    ];
+  }
+  // A column of a private table (without a scope of its own) is managed with its table.
+  // (Its own members can then only be some of the table's: reading it takes both keys.)
+  if (!ownScope && tableScope) {
+    return [
+      buildPrivacyStatus(encryption, "table", tableScope),
+      cssHint(t("It's in a private table: who has access to it is set in the table's settings (Data tab)."),
+        testId("column-private-table")),
+      (encryption.isOwner && encryption.canReadScope(tableScope)) ? cssRow(
+        textButton(t("Restrict to some of them"),
+          dom.on("click", () => editAudience(encryption,
+            { kind: "column", ref: colRef, scope: null, within: tableScope })),
+          testId("column-make-private"))) : null,
+    ];
+  }
+  if (!ownScope) {
+    return cssHintWithIcon(cssHintIcon("Lock"),
+      dom("div", t("This formula uses private columns: only members who can read them can see its results.")),
+      testId("column-private-derived"));
+  }
+  return [
+    buildPrivateTarget(encryption, { kind: "column", ref: colRef, scope: ownScope, within: tableScope }),
+    // (Then reading it takes both keys.)
+    tableScope ? cssHint(t("It's also in a private table: only members with access to both have access to it."),
+      testId("column-private-in-table")) : null,
   ];
 }
 
@@ -120,7 +138,7 @@ export function buildTablePrivacySection(owner: MultiHolder, gristDoc: GristDoc,
       if (!tableRef) { return null; }
       if (!scope) {
         return [
-          cssHint(t("All members of the document can read this table, except its private columns.")),
+          cssHint(t("All members of the document have access to this table, except its private columns.")),
           encryption.isOwner ? cssRow(
             textButton(t("Make private"),
               dom.on("click", () => editAudience(encryption, { kind: "table", ref: tableRef, scope: null })),
@@ -141,6 +159,7 @@ interface PrivacyTarget {
   kind: "column" | "table";
   ref: number;               // colRef or tableRef.
   scope: string | null;      // Null while not private yet.
+  within?: string | null;    // For a column of a private table: the table's scope.
 }
 
 // What a private column or table shows: who can read it, and (for owners who can) the controls.
@@ -150,7 +169,7 @@ function buildPrivateTarget(encryption: IDocEncryption, target: PrivacyTarget & 
   return [
     buildPrivacyStatus(encryption, kind, target.scope),
     (encryption.isOwner && readable) ? [
-      cssRow(textButton(t("Change who can read it"),
+      cssRow(textButton(t("Change who has access"),
         dom.on("click", () => editAudience(encryption, target)),
         testId(`${kind}-change-audience`))),
       cssRow(textButton(t("Make public"),
@@ -167,9 +186,9 @@ function buildPrivacyStatus(encryption: IDocEncryption, kind: "column" | "table"
   return [
     cssHintWithIcon(cssHintIcon("Lock"),
       dom("div", kind === "table" ?
-        (readable ? t("Private table: only these members can read it.") :
+        (readable ? t("Private table: only these members have access to it.") :
           t("Private table: you don't have access to its data.")) :
-        (readable ? t("Private column: only these members can read it.") :
+        (readable ? t("Private column: only these members have access to it.") :
           t("Private column: you don't have access to its values."))),
       testId(`${kind}-private`)),
     domAsync(encryption.getScopeAudience(scope).then(members =>
@@ -189,7 +208,8 @@ function editAudience(encryption: IDocEncryption, target: PrivacyTarget) {
     const selected = new Map<number, Observable<boolean>>();
     const members = Observable.create<EncryptionMember[] | null>(owner, null);
     const load = async () => {
-      const all = (await encryption.listMembers()).filter(m => m.userId !== encryption.userId);
+      const all = (target.within ? await encryption.getScopeAudience(target.within) : await encryption.listMembers())
+        .filter(m => m.userId !== encryption.userId);
       const audience = target.scope ? await encryption.getScopeAudience(target.scope) : [];
       for (const m of all) {
         selected.set(m.userId, Observable.create(owner, audience.some(a => a.userId === m.userId)));
@@ -199,12 +219,14 @@ function editAudience(encryption: IDocEncryption, target: PrivacyTarget) {
     load().catch(reportError);
     return {
       title: isTable ?
-        (target.scope ? t("Who can read this table") : t("Make this table private")) :
-        (target.scope ? t("Who can read this column") : t("Make this column private")),
+        (target.scope ? t("Who has access to this table") : t("Make this table private")) :
+        (target.scope ? t("Who has access to this column") : t("Make this column private")),
       body: [
         cssHint(isTable ?
-          t(`Only the members you select (and you) will be able to read this table's data, and formulas that use it. Others will see a lock in its place. Its name, columns and number of rows stay visible.`) :
-          t(`Only the members you select (and you) will be able to read this column, and formulas that use it. Others will see a lock in its place.`)),
+          t(`Only the members you select (and you) will see this table's data and the results of formulas using it, and can change them if their role allows it. Others will see a lock instead, and can't change them. Its name, columns and number of rows stay visible.`) :
+          target.within ?
+            t(`Among the members with access to the table, only those you select (and you) will see this column's values and the results of formulas using them, and can change them if their role allows it. Others will see a lock instead, and can't change them.`) :
+            t(`Only the members you select (and you) will see this column's values and the results of formulas using them, and can change them if their role allows it. Others will see a lock instead, and can't change them.`)),
         dom.domComputed(members, list => list === null ? cssHint(t("Loading…")) : list.length === 0 ?
           cssHint(t("There are no other members.")) :
           list.map(m => cssRow(labeledSquareCheckbox(selected.get(m.userId)!,
@@ -262,16 +284,108 @@ export function reportKeyGrant(result: KeyGrantResult) {
   }
 }
 
-/** A lock in the header of private columns. */
+/**
+ * A lock in the header of private columns. Not for columns that are private only as part of a
+ * private table: the table's widgets show it once (see buildPrivateTableMarker()).
+ */
 export function buildPrivateColumnMarker(owner: MultiHolder, gristDoc: GristDoc, column: ColumnRec): DomContents {
   const encryption = getEncryption(gristDoc);
   if (!encryption) { return null; }
   const version = keysVersion(owner, encryption);
   const isPrivate = Computed.create(owner, (use) => {
     use(version);
-    return encryption.columnScopes(use(use(column.table).tableId), use(column.colId)).length > 0;
+    const tableRef = use(column.parentId);
+    const tableScope = tableRef ? encryption.tableScope(tableRef) : null;
+    // (For members who can't read the table, all of it is locked alike.)
+    if (tableScope && !encryption.canReadScope(tableScope)) { return false; }
+    return encryption.columnScopes(use(use(column.table).tableId), use(column.colId))
+      .some(scope => scope !== tableScope);
   });
   return dom.maybe(isPrivate, () => cssLockIcon("Lock", testId("column-private-marker")));
+}
+
+/** A lock in the title of widgets of private tables (and in the list of raw data). */
+export function buildPrivateTableMarker(owner: MultiHolder, gristDoc: GristDoc, table: TableRec): DomContents {
+  const encryption = getEncryption(gristDoc);
+  if (!encryption) { return null; }
+  const version = keysVersion(owner, encryption);
+  const scope = Computed.create(owner, (use) => {
+    use(version);
+    const tableRef = use(table.id);
+    return tableRef ? encryption.tableScope(tableRef) : null;
+  });
+  return dom.maybe(scope, s => cssTableLockIcon("Lock",
+    hoverTooltip(encryption.canReadScope(s) ? t("Private table: only some members have access to it.") :
+      t("Private table: you don't have access to its data.")),
+    testId("table-private-marker")));
+}
+
+/**
+ * Under the title of widgets of forms, and of tables forms fill (for members who can edit the
+ * document): answers waiting to be added, and why this member can't add them, if they can't.
+ */
+export function buildWaitingAnswersAlert(owner: MultiHolder, gristDoc: GristDoc, sectionId: number): DomContents {
+  const encryption = getEncryption(gristDoc);
+  if (!encryption?.canEdit) { return null; }
+  const waiting = Observable.create<WaitingAnswers | null>(owner, null);
+  let refreshing = false;
+  const refresh = () => {
+    if (refreshing || owner.isDisposed()) { return; }
+    refreshing = true;
+    encryption.getWaitingAnswers(sectionId)
+      .then((w) => { if (!owner.isDisposed()) { waiting.set(w); } })
+      .catch(e => console.warn("[encryption] Could not list form answers waiting", e))
+      .finally(() => { refreshing = false; });
+  };
+  owner.autoDispose(encryption.inboxChanged.addListener(refresh));
+  owner.autoDispose(encryption.keysChanged.addListener(refresh));
+  // Someone else may add them (with a change to the document), while some are waiting.
+  const onDocAction = () => { if (waiting.get()?.count) { refresh(); } };
+  gristDoc.on("onDocUserAction", onDocAction);
+  owner.onDispose(() => gristDoc.off("onDocUserAction", onDocAction));
+  refresh();
+  return dom.maybe(use => use(waiting)?.count ? use(waiting) : null, (w) => {
+    // (The plural follows `count`; `number` is what's shown, e.g. "200+" when there may be more.)
+    const count = w.count;
+    const number = w.more ? `${w.count}+` : String(w.count);
+    // (Shown as text: i18next's HTML escaping would show apostrophes as "&#39;".)
+    const noEscape = { interpolation: { escapeValue: false } };
+    // E.g. "the column Staff › Salary, the table Payroll".
+    const missing = dom("span", (w.missing || []).flatMap((m, i) => [i > 0 ? ", " : null,
+      m.kind === "table" ? t("the table {{name}}", { name: cssColumnName(m.name) }) :
+        t("the column {{name}}", { name: cssColumnName(m.name) })]));
+    return cssWaitingAnswers(
+      cssWaitingAnswers.cls("-busy", !w.reason),
+      cssWaitingAnswersIcon(w.reason ? "Warning" : "Info"),
+      dom("div",
+        w.reason === "keys" ?
+          t("{{number}} form answers are waiting. Only editors or owners with access to {{missing}} can add them.",
+            { count, number, missing }) :
+          w.reason === "blocked" ?
+            t("{{number}} form answers are waiting. You can't add them. {{reason}}",
+              { count, number, reason: w.message, ...noEscape }) :
+            t("{{number}} form answers are waiting. Adding them…", { count, number }),
+      ),
+      testId("waiting-answers"),
+    );
+  });
+}
+
+/** A lock after the name of pages showing private tables, in the list of pages. */
+export function buildPrivatePageMarker(owner: MultiHolder, gristDoc: GristDoc, view: ViewRec): DomContents {
+  const encryption = getEncryption(gristDoc);
+  if (!encryption) { return null; }
+  const version = keysVersion(owner, encryption);
+  const isPrivate = Computed.create(owner, (use) => {
+    use(version);
+    return use(use(view.viewSections).getObservable()).some((section) => {
+      const tableRef = use(section.tableRef);
+      return Boolean(tableRef && encryption.tableScope(tableRef));
+    });
+  });
+  return dom.maybe(isPrivate, () => cssPageLockIcon("Lock",
+    hoverTooltip(t("This page shows private tables: only some members have access to them.")),
+    testId("page-private-marker")));
 }
 
 /** The "Encryption" section of the document's settings: members, and their access to keys. */
@@ -296,7 +410,7 @@ function confirmDecryption(encryption: IDocEncryption) {
   }, {
     explanation: cssExplanation(
       dom("p", t("The server will be able to read it again.")),
-      dom("p", t("Private columns become access rules, so members who couldn't read them still can't.")),
+      dom("p", t("Private tables and columns become access rules, so members who couldn't read them still can't.")),
     ),
   });
 }
@@ -512,6 +626,22 @@ const cssLockIcon = styled(icon, `
   flex: none;
 `);
 
+const cssTableLockIcon = styled(icon, `
+  --icon-color: ${theme.lightText};
+  width: 12px;
+  height: 12px;
+  margin-right: 4px;
+  flex: none;
+`);
+
+const cssPageLockIcon = styled(icon, `
+  --icon-color: ${theme.lightText};
+  width: 12px;
+  height: 12px;
+  margin: 0 4px;
+  flex: none;
+`);
+
 const cssStatus = styled("div", `
   display: flex;
   align-items: center;
@@ -651,4 +781,34 @@ const cssSuggestion = styled("div", `
   padding: 8px 0;
   border-bottom: 1px solid ${theme.pagePanelsBorder};
   & > div { margin: 4px 0; }
+`);
+
+const cssWaitingAnswers = styled("div.viewsection_alert", `
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border: 1px solid ${colors.warning};
+  border-radius: 4px;
+  background-color: color-mix(in srgb, ${colors.warning} 12%, ${theme.mainPanelBg});
+  color: ${theme.text};
+  line-height: 16px;
+  &-busy {
+    border-color: ${theme.pagePanelsBorder};
+    background-color: ${theme.mainPanelBg};
+  }
+`);
+
+const cssColumnName = styled("span", `
+  font-weight: 600;
+  white-space: nowrap;
+`);
+
+const cssWaitingAnswersIcon = styled(icon, `
+  flex: none;
+  --icon-color: ${colors.warning};
+  .${cssWaitingAnswers.className}-busy > & {
+    --icon-color: ${theme.lightText};
+  }
 `);

@@ -50,7 +50,7 @@ import { CellValue, DocAction, getTableId, isSchemaAction, TableDataAction, User
 import { DocData } from "app/common/DocData";
 import {
   BlobTable, ChangePrivacy, checkMetaAccess, checkSealing, ColumnPrivacy, EncryptionAccessError, hasPrivateMetaFields,
-  isLockedCell, metaCellScopes, MetaContext, MetaLookup, MetaRows, sealActions, sealTables, unsealActions,
+  isLockedCell, LOCKED_CELL, metaCellScopes, MetaContext, MetaLookup, MetaRows, sealActions, sealTables, unsealActions,
   unsealTables,
 } from "app/common/encryption/ColumnPrivacy";
 import { decryptFile, encryptFile, makeFileIdent, parseFileIdent } from "app/common/encryption/EncryptedAttachments";
@@ -67,6 +67,7 @@ import {
 import { Keyring, MissingKeyError, TamperedKeysError } from "app/common/encryption/Keyring";
 import { IDataEngine } from "app/common/encryption/PyodideEngine";
 import { CannotCarryError, SealedCells } from "app/common/encryption/SealedCells";
+import { getDefaultForType } from "app/common/gristTypes";
 
 import { Mutex } from "async-mutex";
 import flatten from "lodash/flatten";
@@ -140,6 +141,9 @@ export interface LocalActiveDocOptions {
   // Called for changes from others that don't respect private columns, or can't be applied (see
   // the comment at the top): skipped, or with some private values locked.
   onInvalidChange?: (change: InvalidChange) => void;
+  // When the member got access to values they have locked (they're only read when opening the
+  // document again, see _lockUnreadable()).
+  onAccessGained?: () => void;
   // Called when keys flagged for replacement couldn't be replaced before an edit: the edit still
   // goes through with the current keys, and replacing them is tried again on the next one.
   onRotationFailed?: (error: Error) => void;
@@ -248,6 +252,8 @@ export class LocalActiveDoc {
   // While loading, nobody is listening for changes yet: they are reflected in what gets fetched.
   private _loading = true;
   private _privacy = new ColumnPrivacy([]);
+  // Columns the member can't read, as of the last _lockUnreadable().
+  private _unreadableColumns = new Set<string>();
   private _frozen: [string, string][] = [];
   private _scopeEntries: [string, string, string[]][] = [];
   private _sealedCells = new SealedCells();
@@ -650,6 +656,7 @@ export class LocalActiveDoc {
     return this._exclusive(async () => {
       await this._keyring.refresh();
       await this._updatePrivacy();
+      await this._lockUnreadable();
       await this._revealIfNeeded().catch(e => this._log("Could not share the values made public yet", e));
     });
   }
@@ -705,6 +712,11 @@ export class LocalActiveDoc {
     const headBefore = this._head;
     await this._catchUp(openResult.actions);
     this._options.onOpenStep?.(`apply changes since snapshot (${this._head - headBefore})`);
+    // What the member can't read as they open it (see _lockUnreadable()).
+    const canUseScope = (scope: string) => this._keyring.canUseScope(scope);
+    this._unreadableColumns = new Set(this._privacy.scopeEntries()
+      .filter(([, , scopes]) => !scopes.every(canUseScope))
+      .map(([tableId, colId]) => JSON.stringify([tableId, colId])));
 
     this._loading = false;
     if (this.canEdit) {
@@ -1019,6 +1031,7 @@ export class LocalActiveDoc {
       await this._checkKeyEntry(record);
       this._head = record.actionNum;
       await this._updatePrivacy();
+      await this._lockUnreadable();
       this._maybeRevealSoon();
       return;
     }
@@ -1222,6 +1235,52 @@ export class LocalActiveDoc {
       });
       if (done) { return; }
     }
+  }
+
+  /**
+   * Shows values the member can't read anymore (e.g. of a column just made private without them)
+   * as locked, in their engine and document, as when they open it again. They received those
+   * values before: this doesn't take them back, but the document shows what they can read now.
+   * (Default values stay, as they're given in clear.)
+   */
+  private async _lockUnreadable() {
+    const canUseScope = (scope: string) => this._keyring.canUseScope(scope);
+    const unreadable = this._privacy.scopeEntries().filter(([, , scopes]) => !scopes.every(canUseScope));
+    // (Only columns that just became unreadable: values received since then come locked.)
+    const added = unreadable.filter(([tableId, colId]) =>
+      !this._unreadableColumns.has(JSON.stringify([tableId, colId])));
+    const previous = this._unreadableColumns;
+    this._unreadableColumns = new Set(unreadable.map(([tableId, colId]) => JSON.stringify([tableId, colId])));
+    // Private columns the member got the keys of: their values come with the document, when
+    // opening it. (Not columns made public: their values get shared, see _revealIfNeeded().)
+    const readablePrivate = new Set(this._privacy.scopeEntries().filter(([, , scopes]) => scopes.every(canUseScope))
+      .map(([tableId, colId]) => JSON.stringify([tableId, colId])));
+    const gained = [...previous].filter(k => readablePrivate.has(k))
+      .map(k => JSON.parse(k) as [string, string]);
+    for (const tableId of new Set(gained.map(([t]) => t))) {
+      const [, , , columns]: TableDataAction = await this._engine.call("fetch_table", tableId);
+      if (gained.some(([t, colId]) => t === tableId && columns[colId]?.some(isLockedCell))) {
+        this._options.onAccessGained?.();
+        break;
+      }
+    }
+    const actions: DocAction[] = [];
+    for (const tableId of new Set(added.map(([t]) => t))) {
+      const [, , rowIds, columns]: TableDataAction = await this._engine.call("fetch_table", tableId);
+      for (const [, colId] of added.filter(([t]) => t === tableId)) {
+        const values = columns[colId];
+        if (!values) { continue; }
+        const defaultValue = getDefaultForType(this._privacy.getColumn(tableId, colId)?.type || "Any");
+        const toLock = rowIds.filter((_, i) => !isLockedCell(values[i]) && !isEqual(values[i], defaultValue));
+        if (toLock.length > 0) {
+          actions.push(["BulkUpdateRecord", tableId, toLock, { [colId]: toLock.map(() => LOCKED_CELL) }]);
+        }
+      }
+    }
+    if (actions.length === 0) { return; }
+    await this._engine.call("apply_doc_actions_exactly", actions, this._options.engineUser);
+    this._emit({ ...this._localBundle([["Calculate"]]), internal: true }, actions, [], [null],
+      { actionNum: 0, actionHash: "", fromSelf: false });
   }
 
   /** The next batch of values to reveal (see _revealIfNeeded()), as doc actions. */

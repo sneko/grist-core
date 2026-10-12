@@ -1,5 +1,6 @@
 import { allCommands } from "app/client/components/commands";
 import { GristDoc } from "app/client/components/GristDoc";
+import { buildPrivatePageMarker } from "app/client/encryption/EncryptionUI";
 import { loadSearch } from "app/client/lib/imports";
 import { makeT } from "app/client/lib/localization";
 import { AppModel, reportError } from "app/client/models/AppModel";
@@ -101,6 +102,8 @@ export function createTopBarDoc(owner: MultiHolder, appModel: AppModel, pageMode
         docBreadcrumbs(displayNameWs, pageModel.currentDocTitle, gristDoc.currentPageName, {
           docNameSave: renameDoc,
           pageNameSave: getRenamePageFn(gristDoc),
+          afterPageName: dom.domComputed(gristDoc.activeViewId, viewId => typeof viewId !== "number" ? null :
+            dom.create(buildPrivatePageMarker, gristDoc, gristDoc.docModel.views.getRowModel(viewId))),
           cancelRecoveryMode: getCancelRecoveryModeFn(gristDoc),
           isPageNameReadOnly: use => use(gristDoc.isReadonly) || typeof use(gristDoc.activeViewId) !== "number",
           isDocNameReadOnly: use => use(gristDoc.isReadonly) || use(pageModel.isFork),

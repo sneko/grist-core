@@ -1197,9 +1197,9 @@
         "editing": "editing",
         "suggesting": "suggesting",
         "INSECURE (mock)": "INSECURE (mock)",
-        "encrypted": "encrypted",
         "End-to-end encrypted: only members holding its key can read this document, the server can't.": "End-to-end encrypted: only members holding its key can read this document, the server can't.",
-        "This server uses a stand-in for the encryption service, with a known key: documents aren't actually protected. For tests and development only.": "This server uses a stand-in for the encryption service, with a known key: documents aren't actually protected. For tests and development only."
+        "This server uses a stand-in for the encryption service, with a known key: documents aren't actually protected. For tests and development only.": "This server uses a stand-in for the encryption service, with a known key: documents aren't actually protected. For tests and development only.",
+        "Encrypted": "Encrypted"
     },
     "duplicatePage": {
         "Duplicate page {{pageName}}": "Duplicate page {{pageName}}",
@@ -1402,7 +1402,8 @@
         "Separate": "Separate",
         "Field in {{count}} views_one": "Field in one view",
         "Field in {{count}} views_other": "Field in {{count}} views",
-        "You don't have access to this private column": "You don't have access to this private column"
+        "You don't have access to this private column": "You don't have access to this private column",
+        "This value is used by a calculation you don't have access to: it has to be changed by a member who can read the private columns it uses.": "This value is used by a calculation you don't have access to: it has to be changed by a member who can read the private columns it uses."
     },
     "FieldEditor": {
         "It should be impossible to save a plain data value into a formula column": "It should be impossible to save a plain data value into a formula column",
@@ -3682,7 +3683,9 @@
         "{{count}} member(s) enabled encryption and are waiting for you to accept them._one": "{{count}} member enabled encryption and is waiting for you to accept them.",
         "{{count}} member(s) enabled encryption and are waiting for you to accept them._other": "{{count}} members enabled encryption and are waiting for you to accept them.",
         "Keys couldn't be replaced after a member lost access: it will be tried again on your next change.": "Keys couldn't be replaced after a member lost access: it will be tried again on your next change.",
-        "This document is encrypted. You have access to it, but not yet to its key: it will open as soon as an owner opens it and gives you access.": "This document is encrypted. You have access to it, but not yet to its key: it will open as soon as an owner opens it and gives you access."
+        "This document is encrypted. You have access to it, but not yet to its key: it will open as soon as an owner opens it and gives you access.": "This document is encrypted. You have access to it, but not yet to its key: it will open as soon as an owner opens it and gives you access.",
+        "Reload to see it": "Reload to see it",
+        "You were given access to more of this document.": "You were given access to more of this document."
     },
     "EncryptionUI": {
         "A member": "A member",
@@ -3781,7 +3784,32 @@
         "Only the members you select (and you) will be able to read this table's data, and formulas that use it. Others will see a lock in its place. Its name, columns and number of rows stay visible.": "Only the members you select (and you) will be able to read this table's data, and formulas that use it. Others will see a lock in its place. Its name, columns and number of rows stay visible.",
         "Private table: only these members can read it.": "Private table: only these members can read it.",
         "Private table: you don't have access to its data.": "Private table: you don't have access to its data.",
-        "Who can read this table": "Who can read this table"
+        "Who can read this table": "Who can read this table",
+        "Private tables and columns become access rules, so members who couldn't read them still can't.": "Private tables and columns become access rules, so members who couldn't read them still can't.",
+        "All members of the document have access to this column.": "All members of the document have access to this column.",
+        "All members of the document have access to this table, except its private columns.": "All members of the document have access to this table, except its private columns.",
+        "Change who has access": "Change who has access",
+        "It's also in a private table: only members with access to both have access to it.": "It's also in a private table: only members with access to both have access to it.",
+        "It's in a private table: who has access to it is set in the table's settings (Data tab).": "It's in a private table: who has access to it is set in the table's settings (Data tab).",
+        "Only the members you select (and you) will see this column's values and the results of formulas using them, and can change them if their role allows it. Others will see a lock instead, and can't change them.": "Only the members you select (and you) will see this column's values and the results of formulas using them, and can change them if their role allows it. Others will see a lock instead, and can't change them.",
+        "Only the members you select (and you) will see this table's data and the results of formulas using it, and can change them if their role allows it. Others will see a lock instead, and can't change them. Its name, columns and number of rows stay visible.": "Only the members you select (and you) will see this table's data and the results of formulas using it, and can change them if their role allows it. Others will see a lock instead, and can't change them. Its name, columns and number of rows stay visible.",
+        "Private column: only these members have access to it.": "Private column: only these members have access to it.",
+        "Private table: only these members have access to it.": "Private table: only these members have access to it.",
+        "Who has access to this column": "Who has access to this column",
+        "Who has access to this table": "Who has access to this table",
+        "Among the members with access to the table, only those you select (and you) will see this column's values and the results of formulas using them, and can change them if their role allows it. Others will see a lock instead, and can't change them.": "Among the members with access to the table, only those you select (and you) will see this column's values and the results of formulas using them, and can change them if their role allows it. Others will see a lock instead, and can't change them.",
+        "Private table: only some members have access to it.": "Private table: only some members have access to it.",
+        "Restrict to some of them": "Restrict to some of them",
+        "This page shows private tables: only some members have access to them.": "This page shows private tables: only some members have access to them.",
+        "Respondents can still answer it: only members who can read this column can read their answers.": "Respondents can still answer it: only members who can read this column can read their answers.",
+        "{{number}} form answers are waiting. Adding them…_one": "{{number}} form answer is waiting. Adding it…",
+        "{{number}} form answers are waiting. Adding them…_other": "{{number}} form answers are waiting. Adding them…",
+        "{{number}} form answers are waiting. You can't add them. {{reason}}_one": "{{number}} form answer is waiting. You can't add it. {{reason}}",
+        "{{number}} form answers are waiting. You can't add them. {{reason}}_other": "{{number}} form answers are waiting. You can't add them. {{reason}}",
+        "the column {{name}}": "the column {{name}}",
+        "the table {{name}}": "the table {{name}}",
+        "{{number}} form answers are waiting. Only editors or owners with access to {{missing}} can add them._one": "{{number}} form answer is waiting. Only editors or owners with access to {{missing}} can add it.",
+        "{{number}} form answers are waiting. Only editors or owners with access to {{missing}} can add them._other": "{{number}} form answers are waiting. Only editors or owners with access to {{missing}} can add them."
     },
     "localAssistant": {
         "API key": "API key",
@@ -3818,5 +3846,33 @@
     "AppUI": {
         "It's decrypted in your browser: the server can't read it.": "It's decrypted in your browser: the server can't read it.",
         "Opening the encrypted document": "Opening the encrypted document"
+    },
+    "EncryptedAccessRules": {
+        "Access rules": "Access rules",
+        "Conditions on user attributes, or on links shared with others": "Conditions on user attributes, or on links shared with others",
+        "Different editing permissions per table or column, and checks of new values": "Different editing permissions per table or column, and checks of new values",
+        "Hiding some rows or cells, depending on their content": "Hiding some rows or cells, depending on their content",
+        "Manage users": "Manage users",
+        "None: all members can read the whole document.": "None: all members can read the whole document.",
+        "None: all members can read the whole document. To make a table or column private, open its settings in the right panel.": "None: all members can read the whole document. To make a table or column private, open its settings in the right panel.",
+        "Not available in encrypted documents": "Not available in encrypted documents",
+        "Open settings": "Open settings",
+        "Private column": "Private column",
+        "Private table": "Private table",
+        "Private tables and columns": "Private tables and columns",
+        "Roles": "Roles",
+        "These access rules need the server to read the data:": "These access rules need the server to read the data:",
+        "This document is end-to-end encrypted: the server can't read its data, so it can't apply access rules with conditions.": "This document is end-to-end encrypted: the server can't read its data, so it can't apply access rules with conditions.",
+        "To use them, remove encryption from the document in its ": "To use them, remove encryption from the document in its ",
+        "Viewers can only read. Editors and owners can change what they can read. Owners manage members and privacy.": "Viewers can only read. Editors and owners can change what they can read. Owners manage members and privacy.",
+        "Viewing the document as another user": "Viewing the document as another user",
+        "What members can read depends on the keys they hold: owners can make whole tables or columns private to some members. What they can change depends on their role.": "What members can read depends on the keys they hold: owners can make whole tables or columns private to some members. What they can change depends on their role.",
+        "You don't have access to it.": "You don't have access to it.",
+        "settings": "settings",
+        "{{name}} (you)": "{{name}} (you)",
+        "None: all members have access to the whole document.": "None: all members have access to the whole document.",
+        "None: all members have access to the whole document. To make a table or column private, open its settings in the right panel.": "None: all members have access to the whole document. To make a table or column private, open its settings in the right panel.",
+        "Owners can make whole tables or columns private: only the members they choose get their keys, to see them and, if their role allows it, change them. What members can change otherwise depends on their role.": "Owners can make whole tables or columns private: only the members they choose get their keys, to see them and, if their role allows it, change them. What members can change otherwise depends on their role.",
+        "Viewers can only view. Editors and owners can change what they have access to. Owners manage members and privacy.": "Viewers can only view. Editors and owners can change what they have access to. Owners manage members and privacy."
     }
 }

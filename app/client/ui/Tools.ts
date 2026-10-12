@@ -74,7 +74,13 @@ export function tools(owner: Disposable, gristDoc: GristDoc, leftPanelOpen: Obse
     cssSectionHeader(cssSectionHeaderText(t("TOOLS"), { id: "grist-tools-heading" })),
     // The assistant sends document content to an AI service: not for encrypted documents.
     isEncrypted ? null : buildOpenAssistantButton(gristDoc, testId("assistant")),
-    isEncrypted ? null : cssPageEntry(
+    // In encrypted documents, the page explains how access works instead (no rules, no "View as").
+    isEncrypted ? cssPageEntry(
+      cssPageEntry.cls("-selected", use => use(gristDoc.activeViewId) === "acl"),
+      cssPageLink(cssPageIcon("EyeShow"), cssLinkText(t("Access Rules")),
+        urlState().setLinkUrl({ docPage: "acl" })),
+      testId("access-rules"),
+    ) : cssPageEntry(
       cssPageEntry.cls("-selected", use => use(gristDoc.activeViewId) === "acl"),
       cssPageEntry.cls("-disabled", use => !use(canViewAccessRules)),
       dom.domComputedOwned(canViewAccessRules, (computedOwner, _canViewAccessRules) => {

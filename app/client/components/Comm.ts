@@ -252,7 +252,8 @@ export class Comm extends DisposableWithEvents implements GristServerAPI, DocLis
       method: methodName,
       args,
     };
-    log.debug("Comm request #" + request.reqId + " " + methodName, request.args);
+    // (Not the arguments of calls about encrypted documents: see redactEncryptedCall().)
+    log.debug("Comm request #" + request.reqId + " " + methodName, methodName.includes("Encrypt") ? "" : request.args);
     return new Promise((resolve, reject) => {
       const requestMsg = JSON.stringify(request);
       const sent = connection.send(requestMsg);

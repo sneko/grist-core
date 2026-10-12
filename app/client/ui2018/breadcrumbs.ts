@@ -177,6 +177,8 @@ export function docBreadcrumbs(
     isProposable?: Observable<boolean>,
     isReadonly?: Observable<boolean>,
     isEncrypted?: boolean,
+    // Shown after the page's name (e.g. a lock for pages of private tables).
+    afterPageName?: DomContents,
   },
 ): Element {
   const shouldShowWorkspace = !(options.isTemplate && options.isAnonymous);
@@ -216,7 +218,7 @@ export function docBreadcrumbs(
       ],
     }),
     dom.maybe(options.isPublic, () => cssPublicIcon("PublicFilled", testId("bc-is-public"))),
-    options.isEncrypted ? cssIconTag(cssTagIcon("Lock"), t("encrypted"),
+    options.isEncrypted ? cssIconTag(cssTagIcon("Lock"), t("Encrypted"),
       hoverTooltip(t(`End-to-end encrypted: only members holding its key can read this document, the server can't.`)),
       testId("encrypted-tag"),
     ) : null,
@@ -277,5 +279,6 @@ not affect the original document.`) }), testId("fiddle-tag"));
         dom.cls(cssHideForNarrowScreen.className),
       ],
     }),
+    options.afterPageName,
   );
 }

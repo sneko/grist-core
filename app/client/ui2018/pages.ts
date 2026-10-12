@@ -26,6 +26,8 @@ export interface PageOptions {
   onCollapseByDefault: (value: boolean) => Promise<void>;
   hasSubPages: () => boolean;
   href: DomElementArg;
+  // Shown after the page's name (e.g. a lock for pages of private tables, in encrypted documents).
+  afterName?: DomElementArg;
 }
 
 function isTargetSelected(target: HTMLElement) {
@@ -165,6 +167,7 @@ export function buildPageDom(name: Observable<string>, options: PageOptions, ...
                 dom.on("click", ev => isTargetSelected(ev.target as HTMLElement) && isRenaming.set(true)),
                 overflowTooltip(),
               ),
+              options.afterName,
             ),
             cssPageMenuTrigger(
               dom.attr("aria-label", use => t("context menu - {{- pageName }}", { pageName: use(name) })),

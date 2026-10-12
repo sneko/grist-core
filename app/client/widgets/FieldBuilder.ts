@@ -127,6 +127,9 @@ export class FieldBuilder extends Disposable {
   private readonly _widgetCons: ko.Computed<{ create: (...args: any[]) => NewAbstractWidget }>;
   private readonly _docModel: DocModel;
   private readonly _readonly: Computed<boolean>;
+  // In encrypted documents: whether the user can't change this column's values (see
+  // whyCantEditValues()), to show it on its cells.
+  private readonly _valuesBlocked: Computed<boolean>;
   private readonly _isForm: ko.Computed<boolean>;
   private readonly _showRefConfigPopup: ko.Observable<boolean>;
   private readonly _isEditorActive = Observable.create(this, false);
@@ -143,6 +146,17 @@ export class FieldBuilder extends Disposable {
 
     this._readonly = Computed.create(this, use =>
       use(gristDoc.isReadonly) || use(field.disableEditData) || Boolean(this._options.isPreview));
+
+    const encryption = gristDoc.docComm.encryption;
+    const keysVersion = Observable.create(this, 0);
+    if (encryption) {
+      this.autoDispose(encryption.keysChanged.addListener(() => keysVersion.set(keysVersion.get() + 1)));
+    }
+    this._valuesBlocked = Computed.create(this, (use) => {
+      use(keysVersion);
+      if (!encryption || use(this._readonly) || use(this.origColumn.isFormula)) { return false; }
+      return Boolean(encryption.whyCantEditValues(use(use(this.origColumn.table).tableId), use(this.origColumn.colId)));
+    });
 
     this._isForm = this.autoDispose(ko.computed(() => {
       return this.field.viewSection().widgetType() === WidgetType.Form;
@@ -749,6 +763,7 @@ export class FieldBuilder extends Disposable {
           }),
         )),
         kd.toggleClass("readonly", toKo(ko, this._readonly)),
+        kd.toggleClass("field_blocked", toKo(ko, this._valuesBlocked)),
         kd.maybe(isSelected, () => dom("div.selected_cursor",
           kd.toggleClass("active_cursor", isActive),
         )),
@@ -794,6 +809,17 @@ export class FieldBuilder extends Disposable {
     const isLocked = isLockedCell(value);
     if (isLocked && !this._canReadPrivateValues()) {
       reportWarning(t("You don't have access to this private column"), { key: "locked-cell" });
+      return clearOwn();
+    }
+
+    // Nor values used by private formulas they can't compute: say so before they type anything.
+    const cantEdit = this._readonly.get() || this.origColumn.isFormula.peek() ? null :
+      this.gristDoc.docComm.encryption?.whyCantEditValues(
+        this.origColumn.table.peek().tableId.peek(), this.origColumn.colId.peek());
+    if (cantEdit) {
+      reportWarning(cantEdit === "noAccess" ? t("You don't have access to this private column") :
+        t(`This value is used by a calculation you don't have access to: it has to be changed by a member who can read the private columns it uses.`),
+      { key: "locked-cell" });
       return clearOwn();
     }
 

@@ -1,5 +1,6 @@
 import * as commands from "app/client/components/commands";
 import { GristDoc } from "app/client/components/GristDoc";
+import { buildPrivateTableMarker } from "app/client/encryption/EncryptionUI";
 import { copyToClipboard } from "app/client/lib/clipboardUtils";
 import { makeTestId } from "app/client/lib/domUtils";
 import { makeT } from "app/client/lib/localization";
@@ -65,7 +66,8 @@ export class DataTables extends Disposable {
                 )),
               ),
               cssTableNameAndId(
-                cssTitleRow(cssTableTitle(this._tableTitle(tableRec, isEditingName), testId("table-title"))),
+                cssTitleRow(dom.create(buildPrivateTableMarker, this._gristDoc, tableRec),
+                  cssTableTitle(this._tableTitle(tableRec, isEditingName), testId("table-title"))),
                 cssDetailsRow(
                   cssTableIdWrapper(cssHoverWrapper(
                     cssUpperCase("Table ID: "),
@@ -333,6 +335,8 @@ const cssTableNameAndId = styled("div", `
 
 const cssTitleRow = styled("div", `
   min-width: 100%;
+  display: flex;
+  align-items: center;
 `);
 
 const cssDetailsRow = styled("div", `

@@ -397,6 +397,8 @@ export class DocPageModelImpl extends Disposable implements DocPageModel {
   public offerRecovery(err: Error) {
     const isDenied = (err as any).code === "ACL_DENY";
     const isDocOwner = isOwner(this.currentDoc.get());
+    // The message is shown as text: i18next's HTML escaping would show "/" as "&#x2F;".
+    const noEscape = { interpolation: { escapeValue: false } };
     confirmModal(
       t("Error accessing document"),
       t("Reload"),
@@ -406,11 +408,11 @@ export class DocPageModelImpl extends Disposable implements DocPageModel {
           isDocOwner ?
             t("You can try reloading the document, or using recovery mode. \
 Recovery mode opens the document to be fully accessible to owners, and inaccessible to others. \
-It also disables formulas. [{{error}}]", { error: err.message }) :
+It also disables formulas. [{{error}}]", { error: err.message, ...noEscape }) :
             isDenied ?
-              t("Sorry, access to this document has been denied. [{{error}}]", { error: err.message }) :
+              t("Sorry, access to this document has been denied. [{{error}}]", { error: err.message, ...noEscape }) :
               t("Please reload the document and if the error persist, \
-contact the document owners to attempt a document recovery. [{{error}}]", { error: err.message })
+contact the document owners to attempt a document recovery. [{{error}}]", { error: err.message, ...noEscape })
         ),
         hideCancel: true,
         extraButtons: !(isDocOwner && !isDenied) ? null : bigBasicButton(
