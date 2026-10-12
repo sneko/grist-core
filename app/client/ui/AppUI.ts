@@ -9,6 +9,7 @@ import {
   loadBillingPage,
   loadBootPage,
 } from "app/client/lib/imports";
+import { makeT } from "app/client/lib/localization";
 import { createSessionObs, isBoolean, isNumber } from "app/client/lib/sessionObs";
 import { AppModel, TopAppModel } from "app/client/models/AppModel";
 import { DocPageModelImpl } from "app/client/models/DocPageModel";
@@ -26,11 +27,14 @@ import { pagePanels } from "app/client/ui/PagePanels";
 import { RightPanel } from "app/client/ui/RightPanel";
 import { createTopBarDoc, createTopBarHome } from "app/client/ui/TopBar";
 import { WelcomePage } from "app/client/ui/WelcomePage";
-import { testId } from "app/client/ui2018/cssVars";
+import { testId, theme, vars } from "app/client/ui2018/cssVars";
+import { loadingSpinner } from "app/client/ui2018/loaders";
 import { getPageTitleSuffix } from "app/common/gristUrls";
 import { getGristConfig } from "app/common/urlUtils";
 
-import { Computed, dom, IDisposable, IDisposableOwner, Observable, replaceContent, subscribe } from "grainjs";
+import { Computed, dom, IDisposable, IDisposableOwner, Observable, replaceContent, styled, subscribe } from "grainjs";
+
+const t = makeT("AppUI");
 
 // When integrating into the old app, we might in theory switch between new-style and old-style
 // content. This function allows disposing the created content by old-style code.
@@ -189,7 +193,9 @@ function pagePanelsDoc(owner: IDisposableOwner, appModel: AppModel, appObj: App)
       content: dom.maybe(rightPanel, panel => panel.content),
     },
     headerMain: dom.create(createTopBarDoc, appModel, pageModel),
-    contentMain: dom.maybe(pageModel.gristDoc, gristDoc => gristDoc.buildDom()),
+    contentMain: dom.domComputed(use => use(pageModel.gristDoc) ?? use(pageModel.openingEncrypted),
+      gristDoc => typeof gristDoc === "object" ? gristDoc.buildDom() :
+        gristDoc ? buildEncryptedDocLoader() : null),
     onResize,
     testId,
     contentTop: buildDocumentBanners(pageModel),
@@ -198,3 +204,30 @@ function pagePanelsDoc(owner: IDisposableOwner, appModel: AppModel, appObj: App)
     app: appObj,
   });
 }
+
+// While an end-to-end encrypted document opens: it takes a moment, all in the browser.
+function buildEncryptedDocLoader() {
+  return cssEncryptedDocLoader(
+    loadingSpinner(),
+    cssEncryptedDocLoaderTitle(t("Opening the encrypted document")),
+    testId("encrypted-doc-loader"),
+  );
+}
+
+const cssEncryptedDocLoader = styled("div", `
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+  text-align: center;
+  color: ${theme.lightText};
+`);
+
+const cssEncryptedDocLoaderTitle = styled("div", `
+  font-size: ${vars.mediumFontSize};
+  font-weight: 600;
+  color: ${theme.text};
+`);

@@ -16,10 +16,6 @@ import * as marshal from "app/common/marshal";
  */
 export interface PyodideLike {
   FS: { writeFile(path: string, data: Uint8Array): void, unlink(path: string): void, mkdirTree(path: string): void };
-  loadPackage(names: string | string[], options?: {
-    messageCallback?: (msg: string) => void,
-    errorCallback?: (msg: string) => void,
-  }): Promise<unknown[]>;
   unpackArchive(buffer: ArrayBuffer | Uint8Array, format: string, options?: { extractDir?: string }): void;
   runPython(code: string): any;
   setStderr?(options: { batched: (msg: string) => void }): void;
@@ -33,13 +29,21 @@ export interface PyodideLike {
 export type EngineExports = Record<string, (...args: any[]) => any>;
 
 export interface PyodideEngineOptions {
-  /** Wheels to load, as URLs (in the browser) or file paths (under Node). */
-  packages: string[];
+  /** The contents of the wheels to install. */
+  packages: Uint8Array[];
   /** A gzipped tarball of sandbox/grist, containing a top-level "grist" directory. */
   gristArchive: Uint8Array;
   /** Functions the engine may call, such as guessColInfo and convertFromColumn. */
   exports: EngineExports;
   log?: (...args: any[]) => void;
+  // Called as each step of starting the engine is done (to measure them).
+  onStep?: (step: string) => void;
+  // Whether Pyodide was restored from a memory snapshot taken by beforeSandbox (see below): the
+  // engine's modules are then imported already, and only files need installing again.
+  restored?: boolean;
+  // Called once the engine's modules are imported, and before anything ties Python to JavaScript
+  // objects (e.g. the engine's callbacks): the moment to take a memory snapshot of Pyodide.
+  beforeSandbox?: () => void;
 }
 
 /**
@@ -62,32 +66,21 @@ export class PyodideEngine implements IDataEngine {
     const log = options.log || (() => {});
     pyodide.setStderr?.({ batched: msg => log("[py]", msg) });
     pyodide.setStdout?.({ batched: msg => log("[py]", msg) });
-    const loaded = await pyodide.loadPackage(options.packages, {
-      messageCallback: msg => log("[package]", msg),
-      errorCallback: msg => log("[package error]", msg),
-    });
-    // loadPackage resolves even when it loaded nothing; catch that here rather than through an
-    // ImportError from deep inside the engine.
-    if (loaded.length !== options.packages.length) {
-      throw new Error(`Pyodide loaded ${loaded.length} of ${options.packages.length} packages`);
+    // A memory snapshot keeps Python's memory, but not files: install them in any case.
+    installFiles(pyodide, options);
+    options.onStep?.(`install ${options.packages.length} Python packages and Grist's code`);
+    if (!options.restored) {
+      // Importing the engine's modules is most of its start: done once, before a snapshot.
+      pyodide.runPython(ENGINE_MODULES.map(m => `import ${m}`).join("\n"));
+      options.onStep?.("import Grist's Python code");
+      options.beforeSandbox?.();
     }
-    // Pyodide only accepts plain typed arrays (not e.g. Node's Buffer subclass).
-    const archive = new Uint8Array(options.gristArchive.buffer, options.gristArchive.byteOffset,
-      options.gristArchive.byteLength);
-    pyodide.unpackArchive(archive, "gztar", { extractDir: "/" });
-    // main.py appends a relative "thirdparty" path, so run from the engine's directory.
-    pyodide.runPython(`
-import os, sys
-sys.path.append('/grist')
-os.chdir('/grist')
-os.environ['IMPORTDIR'] = '${IMPORT_DIR}'
-`);
-    pyodide.FS.mkdirTree(IMPORT_DIR);
     const createSandbox = pyodide.runPython("import direct_sandbox\ndirect_sandbox.create");
     const engine = new PyodideEngine(pyodide, options.exports, log);
     const sandbox = createSandbox(engine._callExternal.bind(engine));
     createSandbox.destroy?.();
     engine._pyCall = sandbox.call;
+    options.onStep?.("create the engine");
     return engine;
   }
 
@@ -156,4 +149,33 @@ os.environ['IMPORTDIR'] = '${IMPORT_DIR}'
     }
     return marshaller.dump();
   }
+}
+
+// The engine's modules, imported when it starts (see direct_sandbox.create()).
+const ENGINE_MODULES = ["direct_sandbox", "main", "actions", "migrations", "objtypes"];
+
+function installFiles(pyodide: PyodideLike, options: PyodideEngineOptions) {
+  const site = pyodide.runPython("import site\nsite.getsitepackages()[0]");
+  // (Pyodide only accepts plain typed arrays, not e.g. Node's Buffer subclass.)
+  const plain = (data: Uint8Array) => new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  for (const wheel of options.packages) {
+    pyodide.unpackArchive(plain(wheel), "wheel", { extractDir: site });
+  }
+  // Compiled extensions (only lazy_object_proxy's, which falls back to pure Python) would need
+  // Pyodide's package loader for their dynamic libraries, which a memory snapshot can't hold.
+  pyodide.runPython(`
+import glob, os
+for f in glob.glob(${JSON.stringify(site)} + '/**/*.so', recursive=True):
+  os.remove(f)
+`);
+  pyodide.unpackArchive(plain(options.gristArchive), "gztar", { extractDir: "/" });
+  // main.py appends a relative "thirdparty" path, so run from the engine's directory.
+  pyodide.runPython(`
+import os, sys
+if '/grist' not in sys.path:
+  sys.path.append('/grist')
+os.chdir('/grist')
+os.environ['IMPORTDIR'] = '${IMPORT_DIR}'
+`);
+  pyodide.FS.mkdirTree(IMPORT_DIR);
 }

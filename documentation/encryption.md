@@ -53,6 +53,13 @@ later by an owner (see below).
   code and the engine are only loaded for encrypted documents (the `loadEncryption` chunk), except
   for a few small modules the rest of the client uses (UI of keys and private columns, exports,
   the custom widgets policy, the guard of the REST API).
+- **Starting the engine** is most of opening a document: Grist reloads the page for each document,
+  so it starts every time. It starts first, alongside the other steps. The first time, once its
+  modules are imported, a memory snapshot of Pyodide is saved in the browser's cache storage
+  (about 45 MB, one per engine version); later starts restore it instead (~0.25 s instead of
+  ~1.2 s). Files aren't part of a snapshot, so the packages and Grist's code are installed again;
+  compiled extensions are dropped for their pure-Python fallbacks (a snapshot can't hold them).
+  The console shows how long each step of opening took (`[encryption] Opened …`).
 - **Changes** are the doc actions computed by the author's engine, encrypted, and appended to a
   linear log numbered by the server. A push based on an outdated head is refused; the browser
   then applies the changes it missed and computes its change again (`LocalActiveDoc`). Other
@@ -87,6 +94,15 @@ later by an owner (see below).
   with all members, by any member who can read them, as soon as one can: until then, snapshots
   aren't saved, as members who can't read them would save them locked). New columns never get
   the id of a removed private column, which would make them private too.
+- **Private tables** use column keys too: a table made private (table settings › Data › Privacy)
+  has all its columns private with the table's key, including columns added later (its binding
+  says the table: `colRef` holds minus the table's row id, see `tableTarget()`). A column of a
+  private table that is private itself needs both keys. The table's structure stays visible to all
+  members (its name, its columns and their settings, its number of rows and their ids), and so do
+  which of its cells are empty (see Limitations). New tables never get the id of a removed private
+  table. When a document is encrypted, access rules hiding a whole table from some members make
+  it a private table; when encryption is removed, a private table becomes a table hidden (rows
+  included, and unchangeable) by an access rule from members who couldn't read it.
 - **Settings revealing private values** are private too, sealed cell by cell: saved filters of
   private columns, the choices of private Choice columns, comments on private cells, and the
   names and sizes of files attached in private columns.
@@ -171,7 +187,7 @@ and released if it goes away.
   document is encrypted, then the file replaces the document's. Earlier versions kept by the
   storage (e.g. S3 versions), which have the content in clear, are deleted. Shares (e.g.
   published forms) are removed. See `EncryptionConversion.ts`.
-- **Making it regular again** (Settings › Encryption › Stop encrypting this document), by an owner
+- **Making it regular again** (Settings › Encryption › Remove encryption), by an owner
   who can read all of it: its browser sends the decrypted content, with access rules replacing
   private columns (hiding them, and formulas using them, from members who couldn't read them),
   and the decrypted attachments; the server writes a regular document next to it
@@ -278,6 +294,11 @@ What works differently:
 - A member without a column's key can't read nor write its values, but can make values they
   can't read locked for everyone (e.g. by replaying sealed values), like any member can damage a
   document. The document's history and snapshots on the server are what to recover from.
+- Cells of private columns and tables holding their default value (e.g. empty) are given in
+  clear, so that members without the key can still add rows: members can tell which cells are
+  empty, but not what the others contain.
+- What a member already had of a column or table before it was made private stays in the
+  document they have open (and anywhere they copied it): only what they get afterwards is locked.
 - A member without a column's key can't make a snapshot right after the column became private
   (values are then only known in clear): members holding the key make it.
 - A member without a column's key making a snapshot passes on the sealed values they received:

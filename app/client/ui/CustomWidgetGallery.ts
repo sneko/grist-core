@@ -345,8 +345,7 @@ class CustomWidgetGallery extends Disposable {
       const isValidUrl = this._customUrlInput?.reportValidity();
       const isEmptyUrl = !this._customUrl.get().length;
       if (!isEmptyUrl && this._gristDoc.docComm.isEncrypted && !isWidgetAllowedInEncryptedDoc(this._customUrl.get())) {
-        reportError(new Error(t("This widget can't be used in end-to-end encrypted documents: it would see their " +
-          "content.")));
+        reportError(new Error(t(`This widget can't be used in end-to-end encrypted documents: it would see their content.`)));
         return false;
       }
       return isEmptyUrl || (isValidUrl && await userTrustsCustomWidget());

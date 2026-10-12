@@ -18,7 +18,7 @@ import {
 } from "app/common/encryption/EncryptedPayloads";
 import { base64ToBytes, bytesToBase64, MockKeyVault } from "app/common/encryption/EncryptionCrypto";
 import {
-  DOC_SCOPE, EncryptedActionRecord, makeColumnScope, makeKeyId,
+  DOC_SCOPE, EncryptedActionRecord, makeColumnScope, makeKeyId, tableTarget,
 } from "app/common/encryption/EncryptionTypes";
 import { buildFormSpec, FormAnswerHelpers, readFormAnswers } from "app/common/encryption/FormSpecs";
 import { fromKeyRecord, Keyring, MissingKeyError } from "app/common/encryption/Keyring";
@@ -29,6 +29,7 @@ import { createNodePyodideEngine } from "app/server/lib/encryption/NodePyodideEn
 import { MemoryMember, MemoryRelay, RelayClient } from "test/server/lib/encryption/MemoryRelay";
 
 import { assert } from "chai";
+import * as sinon from "sinon";
 
 describe("encryption/LocalActiveDoc", function() {
   this.timeout(120000);
@@ -48,6 +49,7 @@ describe("encryption/LocalActiveDoc", function() {
     client: RelayClient;
     received: LocalDocUserAction[];
     skipped: InvalidChange[];
+    rotationFailures: Error[];
   }
 
   async function join(relay: MemoryRelay, member: MemoryMember, options: {
@@ -56,6 +58,7 @@ describe("encryption/LocalActiveDoc", function() {
     const client = relay.connect(member.userId);
     const received: LocalDocUserAction[] = [];
     const skipped: InvalidChange[] = [];
+    const rotationFailures: Error[] = [];
     const keyring = new Keyring(vault, () => client.getKeys(), relay.getKeys(member.userId));
     const doc = await LocalActiveDoc.open({
       engine: await createNodePyodideEngine(),
@@ -68,6 +71,7 @@ describe("encryption/LocalActiveDoc", function() {
       canSuggest: options.canSuggest,
       onDocUserAction: action => received.push(action),
       onInvalidChange: change => skipped.push(change),
+      onRotationFailed: e => rotationFailures.push(e),
       vaultIdFor,
       snapshotEvery: options.snapshotEvery,
       // (Set DEBUG_ENCRYPTION to see what each browser does.)
@@ -75,7 +79,7 @@ describe("encryption/LocalActiveDoc", function() {
       newDocSettings: options.create ? { timezone: "Europe/Paris", locale: "fr-FR" } : undefined,
     }, relay.open(member.userId));
     client.doc = doc;
-    return { member, doc, client, received, skipped };
+    return { member, doc, client, received, skipped, rotationFailures };
   }
 
   function leave(relay: MemoryRelay, p: Participant) {
@@ -539,6 +543,31 @@ describe("encryption/LocalActiveDoc", function() {
       await b.doc.sync();
       assert.deepEqual((await tableValues(b, "Notes"))[3].Text, ["start", "after"]);
     });
+    it("keeps editing when keys can't be replaced, and replaces them on a later edit", async function() {
+      const oldKeyId = relay.currentKey(DOC_SCOPE)!.keyId;
+      removeCarol();
+      await a.doc.refreshKeys();
+      // The encryption service fails once: the edit still goes through, with the current key.
+      const createDocumentKey = sinon.stub(vault, "createDocumentKey").rejects(new Error("vault unavailable"));
+      try {
+        await a.doc.applyUserActions([["AddRecord", "Notes", null, { Text: "meanwhile" }]]);
+      } finally {
+        createDocumentKey.restore();
+      }
+      assert.lengthOf(a.rotationFailures, 1);
+      assert.equal(relay.currentKey(DOC_SCOPE)!.keyId, oldKeyId);
+      assert.isTrue(relay.currentKey(DOC_SCOPE)!.rotateOnNextEdit);
+      await b.doc.sync();
+      assert.deepEqual((await tableValues(b, "Notes"))[3].Text, ["start", "meanwhile"]);
+
+      // The next edit replaces it.
+      await a.doc.applyUserActions([["AddRecord", "Notes", null, { Text: "after" }]]);
+      const newKeyId = relay.currentKey(DOC_SCOPE)!.keyId;
+      assert.notEqual(newKeyId, oldKeyId);
+      assert.sameMembers(relay.wraps.filter(w => w.keyId === newKeyId).map(w => w.userId), [alice.userId, bob.userId]);
+      await b.doc.sync();
+      assert.deepEqual((await tableValues(b, "Notes"))[3].Text, ["start", "meanwhile", "after"]);
+    });
   });
 
   describe("private columns", function() {
@@ -813,6 +842,134 @@ describe("encryption/LocalActiveDoc", function() {
       assert.deepInclude((await tableValues(a, "Staff"))[3], { Salary: [56000, 63000], Total: [56800, 64000] });
     });
   });
+  describe("private tables", function() {
+    let relay: MemoryRelay;
+    let a: Participant;   // Owner: can read everything.
+    let b: Participant;   // Can read the private table.
+    let c: Participant;   // Can't.
+    let scope: string;
+    let staffRef: number;
+
+    before(async function() {
+      relay = await newRelay(bob, carol);
+      a = await join(relay, alice, { create: true });
+      await giveKeys(relay, DOC_SCOPE, bob, carol);
+      await a.doc.applyUserActions([
+        ["AddTable", "Staff", [
+          { id: "Name", type: "Text", isFormula: false },
+          { id: "Salary", type: "Numeric", isFormula: false },
+          { id: "Total", type: "Numeric", isFormula: true, formula: "$Salary + 100" },
+        ]],
+        ["BulkAddRecord", "Staff", [null, null], { Name: ["Ana", "Ben"], Salary: [52100, 61300] }],
+        ["AddTable", "Teams", [{ id: "Team", type: "Text", isFormula: false },
+          { id: "Count", type: "Any", isFormula: true, formula: "len(Staff.all)" },
+          { id: "Names", type: "Any", isFormula: true, formula: "' '.join(Staff.all.Name)" }]],
+        ["AddRecord", "Teams", null, { Team: "Core" }],
+      ]);
+      // Make the whole Staff table private, readable by Alice and Bob.
+      scope = makeColumnScope();
+      const tables = await tableValues(a, "_grist_Tables");
+      staffRef = tables[2][tables[3].tableId.indexOf("Staff")];
+      await a.doc.createScopeKey(scope, [alice, bob].map(m => ({ ...m, vaultUserId: vaultIdFor(m) })),
+        tableTarget(staffRef), { compact: true });
+      b = await join(relay, bob);
+      c = await join(relay, carol);
+    });
+
+    after(function() {
+      for (const p of [a, b, c]) { leave(relay, p); }
+    });
+
+    it("makes all the table's columns private, and formulas reading them", function() {
+      for (const colId of ["Name", "Salary", "Total", "manualSort"]) {
+        assert.deepEqual(a.doc.privacy.scopesOf("Staff", colId), [scope], colId);
+      }
+      // (Formulas elsewhere naming its columns are private too.)
+      assert.deepEqual(a.doc.privacy.scopesOf("Teams", "Names"), [scope]);
+      assert.deepEqual(a.doc.privacy.scopesOf("Teams", "Team"), []);
+    });
+
+    it("shows its values only to members holding its key", async function() {
+      for (const p of [a, b]) {
+        assert.deepInclude((await tableValues(p, "Staff"))[3], { Name: ["Ana", "Ben"], Salary: [52100, 61300] });
+      }
+      const locked = (await tableValues(c, "Staff"))[3];
+      assert.deepEqual(locked.Name, [LOCKED_CELL, LOCKED_CELL]);
+      assert.deepEqual(locked.Salary, [LOCKED_CELL, LOCKED_CELL]);
+      const readable = await readableWithDocKey(relay);
+      for (const secret of ["Ana", "Ben", "52100", "61300"]) {
+        assert.notInclude(readable, secret);
+      }
+    });
+
+    it("makes columns added later private too", async function() {
+      await a.doc.applyUserActions([
+        ["AddColumn", "Staff", "City", { type: "Text", isFormula: false }],
+        ["UpdateRecord", "Staff", 1, { City: "Lyon" }],
+      ]);
+      assert.deepEqual(a.doc.privacy.scopesOf("Staff", "City"), [scope]);
+      for (const p of [b, c]) { await p.doc.sync(); }
+      assert.equal((await tableValues(b, "Staff"))[3].City[0], "Lyon");
+      assert.equal((await tableValues(c, "Staff"))[3].City[0], LOCKED_CELL);
+      assert.notInclude(await readableWithDocKey(relay), "Lyon");
+    });
+
+    it("refuses changes to it from members without its key", async function() {
+      await assert.isRejected(c.doc.applyUserActions([["UpdateRecord", "Staff", 1, { Salary: 1 }]]));
+      await assert.isRejected(c.doc.applyUserActions([["AddRecord", "Staff", null, { Name: "Eve" }]]));
+      await b.doc.applyUserActions([["UpdateRecord", "Staff", 2, { Salary: 62000 }]]);
+      await a.doc.sync();
+      assert.equal((await tableValues(a, "Staff"))[3].Salary[1], 62000);
+    });
+
+    it("needs both keys to read a private column of a private table", async function() {
+      // Salary is made private too, to Alice and Carol: Carol doesn't hold the table's key.
+      const colScope = makeColumnScope();
+      const cols = await tableValues(a, "_grist_Tables_column");
+      const salaryRef = cols[2][cols[3].colId.indexOf("Salary")];
+      await a.doc.createScopeKey(colScope, [alice, carol].map(m => ({ ...m, vaultUserId: vaultIdFor(m) })), salaryRef,
+        { compact: true });
+      assert.deepEqual(a.doc.privacy.scopesOf("Staff", "Salary"), [colScope, scope].sort());
+      // (What members had already read stays in documents they have open: they open it again.)
+      for (const p of [b, c]) { leave(relay, p); }
+      b = await join(relay, bob);
+      c = await join(relay, carol);
+      assert.equal((await tableValues(a, "Staff"))[3].Salary[0], 52100);
+      // Bob holds only the table's key, Carol only the column's: neither can read it.
+      assert.equal((await tableValues(b, "Staff"))[3].Salary[0], LOCKED_CELL);
+      assert.equal((await tableValues(b, "Staff"))[3].Name[0], "Ana");
+      assert.equal((await tableValues(c, "Staff"))[3].Salary[0], LOCKED_CELL);
+    });
+
+    it("becomes a table hidden by access rules in a regular document", async function() {
+      const plain = await a.doc.exportPlain(makeAccessRuleActions(a.doc.docData, a.doc.privacy, a.doc.keyring,
+        relay.listMembers()));
+      const resources = plain.tables._grist_ACLResources;
+      const rules = plain.tables._grist_ACLRules;
+      const ruleFor = (colIds: string) => {
+        const resourceRef = resources[2][resources[3].colIds.indexOf(colIds)];
+        assert.equal(resources[3].tableId[resources[2].indexOf(resourceRef)], "Staff");
+        const index = rules[3].resource.indexOf(resourceRef);
+        return { formula: rules[3].aclFormula[index], permissions: rules[3].permissionsText[index] };
+      };
+      // The whole table (rows included) for those who could read it, and the column private too
+      // (with the formula using it) for those who held its key: both rules apply, as both keys did.
+      assert.deepEqual(ruleFor("*"), { formula: `user.UserID not in [${alice.userId}, ${bob.userId}]`,
+        permissions: "-CRUD" });
+      assert.deepEqual(ruleFor("Salary,Total"), { formula: `user.UserID not in [${alice.userId}, ${carol.userId}]`,
+        permissions: "-RU" });
+    });
+
+    it("keeps the id of a removed private table from being reused", async function() {
+      await a.doc.applyUserActions([["RemoveTable", "Staff"]]);
+      await a.doc.applyUserActions([["AddTable", "Other", [{ id: "X", type: "Text", isFormula: false }]]]);
+      const tables = await tableValues(a, "_grist_Tables");
+      assert.notEqual(tables[2][tables[3].tableId.indexOf("Other")], staffRef);
+      assert.deepEqual(a.doc.privacy.scopesOf("Other", "X"), []);
+      await a.doc.applyUserActions([["RemoveTable", "Other"]]);
+    });
+  });
+
   describe("what reveals private values", function() {
     let relay: MemoryRelay;
     let a: Participant;   // Owner: can read everything.

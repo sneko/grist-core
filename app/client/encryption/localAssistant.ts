@@ -135,11 +135,9 @@ function ensureConsent(config: EncryptionAssistantConfig): Promise<void> {
     modal(ctl => [
       cssModalTitle(t("Send this document's structure to an AI service?")),
       cssModalBody(
-        dom("p", t("This document is end-to-end encrypted. To help you with formulas, the assistant sends, " +
-          "from your browser:")),
+        dom("p", t(`This document is end-to-end encrypted. To help you with formulas, the assistant sends, from your browser:`)),
         dom("ul",
-          dom("li", t("the structure of the document: names and types of its tables and columns (including " +
-            "the choices of choice columns), and their formulas;")),
+          dom("li", t(`the structure of the document: names and types of its tables and columns (including the choices of choice columns), and their formulas;`)),
           dom("li", t("what you ask the assistant.")),
         ),
         dom("p", t("It doesn't send the values in cells. The service is run by {{provider}}.",
@@ -175,8 +173,7 @@ function ensureApiKey(config: EncryptionAssistantConfig): Promise<string> {
       return [
         cssModalTitle(t("API key for {{provider}}", { provider: config.provider })),
         cssModalBody(
-          dom("p", t("The AI assistant uses your own API key for this service. It's kept in this browser only " +
-            "(Grist's server never sees it).")),
+          dom("p", t(`The AI assistant uses your own API key for this service. It's kept in this browser only (Grist's server never sees it).`)),
           textInput(key, { type: "password", placeholder: t("API key") }, testId("assistant-api-key")),
         ),
         cssModalButtons(

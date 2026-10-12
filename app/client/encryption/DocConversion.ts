@@ -11,6 +11,7 @@
  */
 import { Comm } from "app/client/components/Comm";
 import { CommRelay } from "app/client/encryption/EncryptedDocSession";
+import { ensureVaultKeys } from "app/client/encryption/EncryptedDocSession";
 import { getKeyVault } from "app/client/encryption/keyVaults";
 import { lockingHere } from "app/client/encryption/lockOverlay";
 import { TableDataAction } from "app/common/DocActions";
@@ -57,6 +58,19 @@ export function makeVaultIdFor(config: EncryptionClientConfig) {
 }
 
 /**
+ * Makes sure the user can encrypt documents: known to the encryption service, with keys set up
+ * there (asking them to, see ensureVaultKeys()). Returns their vault.
+ */
+export async function ensureReadyToEncrypt(comm: Comm, docId: string, config: EncryptionClientConfig) {
+  const identity: { userId: number, vaultUserId: string | null } =
+    await new CommRelay(comm, docId).call("getEncryptionIdentity");
+  if (!makeVaultIdFor(config)(identity)) { throw new Error("Your account is not known to the encryption service"); }
+  const vault = await getKeyVault(config, identity.vaultUserId);
+  await ensureVaultKeys(vault, "encrypt");
+  return vault;
+}
+
+/**
  * Encrypts a regular document, by one of its owners (who must be able to read all of it, i.e. with
  * no access rules in it). Its members who enabled encryption get its key; others get it later, as
  * for any encrypted document. The document must be reopened once done.
@@ -68,18 +82,18 @@ export async function encryptDocument(comm: Comm, docId: string, userId: number,
   comm.useDocConnection(docId);
   try {
     onProgress(0, "start");
+    // The user's own encryption setup comes first: nothing is touched until it's there.
+    const vaultIdFor = makeVaultIdFor(config);
+    const identity: { userId: number, vaultUserId: string | null } = await relay.call("getEncryptionIdentity");
+    if (!vaultIdFor(identity)) { throw new Error("Your account is not known to the encryption service"); }
+    const vault = await getKeyVault(config, identity.vaultUserId);
+    await prepareVault(vault);
+
     const start: {
       size: number, attachments: { rowId: number, size: number }[], members: Member[],
       columnAudiences: { colRef: number, userIds: number[] }[], droppedRules: number,
     } = await relay.call("beginDocEncryption");
     try {
-      const vaultIdFor = makeVaultIdFor(config);
-      const me = start.members.find(m => m.userId === userId);
-      const myVaultId = me && vaultIdFor(me);
-      if (!myVaultId) { throw new Error("Your account is not known to the encryption service"); }
-      const vault = await getKeyVault(config, me.vaultUserId);
-      await prepareVault(vault);
-
       // The document key, for members who can get one now.
       const known = start.members.filter(m => vaultIdFor(m));
       const registered = await vault.getRegisteredUsers(known.map(m => vaultIdFor(m)!));

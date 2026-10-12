@@ -22,7 +22,7 @@ import { EmptyFilterState } from "app/client/components/LinkingState";
 import { RefSelect } from "app/client/components/RefSelect";
 import { kbJumperAnchor } from "app/client/components/RegionFocusSwitcher";
 import ViewConfigTab from "app/client/components/ViewConfigTab";
-import { buildColumnPrivacySection } from "app/client/encryption/EncryptionUI";
+import { buildColumnPrivacySection, buildTablePrivacySection } from "app/client/encryption/EncryptionUI";
 import { domAsync } from "app/client/lib/domAsync";
 import * as imports from "app/client/lib/imports";
 import { makeT } from "app/client/lib/localization";
@@ -897,6 +897,13 @@ export class RightPanel extends Disposable {
           cssRow.cls("-top-space"),
           )),
       ),
+
+      // For encrypted documents: who can read the table (summary tables follow their source).
+      this._gristDoc.docComm.encryption ? dom.domComputed(use => use(table), tableRec =>
+        dom.maybe(use => !use(tableRec.summarySourceTable), () => [
+          cssSeparator(),
+          cssSection(dom.create(buildTablePrivacySection, this._gristDoc, tableRec), testId("panel-table-privacy")),
+        ])) : null,
 
       // TODO: "Advanced settings" is for "on-demand" marking of tables. This is now a deprecated feature. UIRowId
       // is only shown for tables that are marked as "on-demand""

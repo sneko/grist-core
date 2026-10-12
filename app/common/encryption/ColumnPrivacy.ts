@@ -2,9 +2,11 @@
  * Private columns of encrypted documents: columns whose values only some members can read.
  *
  * A column is made private by giving it a scope ("column:<id>"), whose keys only some members
- * hold (see EncryptionTypes.ts). Which column a scope protects is kept by the server
- * (ScopeBinding), not in the document: any member holding the document key can change the
- * document, but only owners holding a column's key can make it public again. The column's
+ * hold (see EncryptionTypes.ts). A whole table can be too: all its columns, including those added
+ * later, then have the table's scope (and also their own, for those private themselves). Which
+ * column or table a scope protects is kept by the server (ScopeBinding), not in the document: any
+ * member holding the document key can change the document, but only owners holding a column's key
+ * can make it public again. The column's
  * values then travel and get stored encrypted with the scope's key, inside changes and snapshots
  * that are otherwise encrypted with the document key ("sealed", see sealActions()).
  *
@@ -40,7 +42,7 @@ import { CellValue, DocAction, TableDataAction } from "app/common/DocActions";
 import { parseFileIdent } from "app/common/encryption/EncryptedAttachments";
 import { marshalValue, unmarshalValue } from "app/common/encryption/EncryptedPayloads";
 import { base64ToBytes, bytesToBase64 } from "app/common/encryption/EncryptionCrypto";
-import { isColumnScope } from "app/common/encryption/EncryptionTypes";
+import { isColumnScope, tableTarget } from "app/common/encryption/EncryptionTypes";
 import { Keyring, MissingKeyError } from "app/common/encryption/Keyring";
 import { isLockedCell, LOCKED_CELL } from "app/common/encryption/LockedCell";
 import { getDefaultForType } from "app/common/gristTypes";
@@ -64,7 +66,8 @@ interface ColumnInfo {
   type: string;
   isFormula: boolean;
   formula: string;
-  ownScope: string | null;
+  // The scopes of the column's own data: its own, and its table's if the table is private.
+  ownScopes: string[];
   sourceRef: number;        // For group-by columns of summary tables: the source column.
 }
 
@@ -82,7 +85,7 @@ const COLUMN_DEFINITION_FIELDS = ["colId", "type", "isFormula", "formula", "pare
 export class ColumnPrivacy {
   /**
    * Builds the model from the _grist_Tables and _grist_Tables_column metadata tables, and the
-   * private columns (colRef -> scope, see Keyring.bindingsAt()).
+   * private columns and tables (target -> scope, see Keyring.bindingsAt() and tableTarget()).
    */
   public static fromMetaTables(tables: TableDataAction, columns: TableDataAction,
     bindings: Map<number, string>): ColumnPrivacy {
@@ -100,7 +103,9 @@ export class ColumnPrivacy {
         type: String(values.type[i] || "Any"),
         isFormula: Boolean(values.isFormula[i]),
         formula: String(values.formula[i] || ""),
-        ownScope: bindings.get(colRef) ?? null,
+        // (A column of a private table, private itself too, needs both keys.)
+        ownScopes: [bindings.get(colRef), bindings.get(tableTarget(values.parentId[i] as number))]
+          .filter((scope): scope is string => Boolean(scope)).sort(),
         sourceRef: Number(values.summarySourceCol?.[i]) || 0,
       });
     });
@@ -120,7 +125,7 @@ export class ColumnPrivacy {
       const sameId = this._byColId.get(col.colId);
       if (sameId) { sameId.push(col); } else { this._byColId.set(col.colId, [col]); }
       if (col.formula) { this._tokens.set(col, getTokens(col.formula)); }
-      this._scopes.set(key(col.tableId, col.colId), col.ownScope ? [col.ownScope] : []);
+      this._scopes.set(key(col.tableId, col.colId), col.ownScopes);
     }
     // Formulas (including trigger formulas of data columns) reading protected columns are
     // protected too, and so are the group-by columns of summaries of protected columns. Repeat

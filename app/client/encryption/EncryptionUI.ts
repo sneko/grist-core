@@ -3,6 +3,7 @@
  * headers), and members' access (in the document's settings). Only shown for encrypted
  * documents, through DocComm.encryption (see types.ts).
  */
+import { cssSmallButton } from "app/client/components/Forms/styles";
 import { domAsync } from "app/client/lib/domAsync";
 import { loadEncryption } from "app/client/lib/imports";
 import { makeT } from "app/client/lib/localization";
@@ -10,7 +11,9 @@ import { reportError, reportSuccess, reportWarning } from "app/client/models/err
 import { urlState } from "app/client/models/gristUrlState";
 import { textInput } from "app/client/ui/inputs";
 import { cssLabel, cssRow } from "app/client/ui/RightPanelStyles";
-import { basicButton, primaryButton } from "app/client/ui2018/buttons";
+import { SectionItem } from "app/client/ui/SettingsLayout";
+import { hoverTooltip } from "app/client/ui/tooltips";
+import { basicButton, primaryButton, textButton } from "app/client/ui2018/buttons";
 import { labeledSquareCheckbox } from "app/client/ui2018/checkbox";
 import { testId, theme } from "app/client/ui2018/cssVars";
 import { icon } from "app/client/ui2018/icons";
@@ -27,6 +30,8 @@ import type { GristDoc } from "app/client/components/GristDoc";
 import type { EncryptionSummary } from "app/client/encryption/DocConversion";
 import type { IDocEncryption, KeyGrantResult } from "app/client/encryption/types";
 import type { ColumnRec } from "app/client/models/entities/ColumnRec";
+import type { TableRec } from "app/client/models/entities/TableRec";
+import type { IKeyVault } from "app/common/encryption/EncryptionCrypto";
 
 const t = makeT("EncryptionUI");
 
@@ -56,48 +61,130 @@ export function buildColumnPrivacySection(owner: MultiHolder, gristDoc: GristDoc
       const tableId = use(use(column.table).tableId);
       const colId = use(column.colId);
       const colRef = use(column.id);
-      return { scopes: encryption.columnScopes(tableId, colId), colRef, ownScope: encryption.columnOwnScope(colRef) };
-    }, ({ scopes, colRef, ownScope }) => {
+      const tableRef = use(column.parentId);
+      return {
+        scopes: encryption.columnScopes(tableId, colId), colRef,
+        ownScope: encryption.columnOwnScope(colRef),
+        tableScope: tableRef ? encryption.tableScope(tableRef) : null,
+      };
+    }, ({ scopes, colRef, ownScope, tableScope }) => {
       if (!colRef) { return null; }
       if (scopes.length === 0) {
         return [
           cssHint(t("All members of the document can read this column.")),
           encryption.isOwner ? cssRow(
-            basicButton(icon("Lock"), " ", t("Make private"),
-              dom.on("click", () => editAudience(encryption, { colRef, scope: null })),
+            textButton(t("Make private"),
+              dom.on("click", () => editAudience(encryption, { kind: "column", ref: colRef, scope: null })),
               testId("column-make-private")),
           ) : null,
         ];
       }
-      const readable = scopes.every(scope => encryption.canReadScope(scope));
+      // A column of a private table (without a scope of its own) is managed with its table.
+      if (!ownScope && tableScope) {
+        return [
+          buildPrivacyStatus(encryption, "table", tableScope),
+          cssHint(t("It's in a private table: who can read it is set in the table's settings (Data tab)."),
+            testId("column-private-table")),
+        ];
+      }
       if (!ownScope) {
-        return cssHint(icon("Lock"), " ",
-          t("This formula uses private columns: only members who can read them can see its results."),
+        return cssHintWithIcon(cssHintIcon("Lock"),
+          dom("div", t("This formula uses private columns: only members who can read them can see its results.")),
           testId("column-private-derived"));
       }
       return [
-        cssHint(icon("Lock"), " ", readable ?
-          t("Private column: only some members can read it.") :
-          t("Private column: you don't have access to its values."),
-        testId("column-private")),
-        domAsync(encryption.getScopeAudience(ownScope).then(members =>
-          cssAudience(members.map(m => cssMember(m.name || m.email, testId("column-audience-member")))),
-        )),
-        (encryption.isOwner && readable) ? cssRow(
-          basicButton(t("Change who can read it"),
-            dom.on("click", () => editAudience(encryption, { colRef, scope: ownScope })),
-            testId("column-change-audience")),
-          basicButton(t("Make public"),
-            dom.on("click", () => encryption.makeColumnPublic(colRef).catch(reportError)),
-            testId("column-make-public")),
-        ) : null,
+        buildPrivateTarget(encryption, { kind: "column", ref: colRef, scope: ownScope }),
+        // (Then reading it takes both keys.)
+        tableScope ? cssHint(t("It's also in a private table: only members who can read both can read it."),
+          testId("column-private-in-table")) : null,
       ];
     }),
   ];
 }
 
-/** Picks the members who can read a private column (making it private if it isn't yet). */
-function editAudience(encryption: IDocEncryption, target: { colRef: number, scope: string | null }) {
+/**
+ * The "Privacy" section of a table's settings, for encrypted documents: who can read the whole
+ * table (and, for owners, the controls to change it). Summary tables follow their source.
+ */
+export function buildTablePrivacySection(owner: MultiHolder, gristDoc: GristDoc, table: TableRec): DomContents {
+  const encryption = getEncryption(gristDoc);
+  if (!encryption) { return null; }
+  const version = keysVersion(owner, encryption);
+  return [
+    cssLabel(t("PRIVACY")),
+    dom.domComputed((use) => {
+      use(version);
+      const tableRef = use(table.id);
+      return { tableRef, scope: tableRef ? encryption.tableScope(tableRef) : null };
+    }, ({ tableRef, scope }) => {
+      if (!tableRef) { return null; }
+      if (!scope) {
+        return [
+          cssHint(t("All members of the document can read this table, except its private columns.")),
+          encryption.isOwner ? cssRow(
+            textButton(t("Make private"),
+              dom.on("click", () => editAudience(encryption, { kind: "table", ref: tableRef, scope: null })),
+              testId("table-make-private")),
+          ) : null,
+        ];
+      }
+      return [
+        buildPrivateTarget(encryption, { kind: "table", ref: tableRef, scope }),
+        cssHint(t("Its name, its columns and its number of rows stay visible to all members."),
+          testId("table-private-visible")),
+      ];
+    }),
+  ];
+}
+
+interface PrivacyTarget {
+  kind: "column" | "table";
+  ref: number;               // colRef or tableRef.
+  scope: string | null;      // Null while not private yet.
+}
+
+// What a private column or table shows: who can read it, and (for owners who can) the controls.
+function buildPrivateTarget(encryption: IDocEncryption, target: PrivacyTarget & { scope: string }): DomContents {
+  const readable = encryption.canReadScope(target.scope);
+  const kind = target.kind;
+  return [
+    buildPrivacyStatus(encryption, kind, target.scope),
+    (encryption.isOwner && readable) ? [
+      cssRow(textButton(t("Change who can read it"),
+        dom.on("click", () => editAudience(encryption, target)),
+        testId(`${kind}-change-audience`))),
+      cssRow(textButton(t("Make public"),
+        dom.on("click", () => (kind === "table" ? encryption.makeTablePublic(target.ref) :
+          encryption.makeColumnPublic(target.ref)).catch(reportError)),
+        testId(`${kind}-make-public`))),
+    ] : null,
+  ];
+}
+
+// "Private column/table", and the members who can read it.
+function buildPrivacyStatus(encryption: IDocEncryption, kind: "column" | "table", scope: string): DomContents {
+  const readable = encryption.canReadScope(scope);
+  return [
+    cssHintWithIcon(cssHintIcon("Lock"),
+      dom("div", kind === "table" ?
+        (readable ? t("Private table: only these members can read it.") :
+          t("Private table: you don't have access to its data.")) :
+        (readable ? t("Private column: only these members can read it.") :
+          t("Private column: you don't have access to its values."))),
+      testId(`${kind}-private`)),
+    domAsync(encryption.getScopeAudience(scope).then(members =>
+      cssAudience(members.map(m => cssMember(
+        m.userId === encryption.userId ? t("{{name}} (you)", { name: m.name || m.email }) : (m.name || m.email),
+        hoverTooltip(m.email),
+        testId(`${kind}-audience-member`),
+      ))),
+    )),
+  ];
+}
+
+/** Picks the members who can read a private column or table (making it private if it isn't yet). */
+function editAudience(encryption: IDocEncryption, target: PrivacyTarget) {
+  const isTable = target.kind === "table";
   saveModal((ctl, owner) => {
     const selected = new Map<number, Observable<boolean>>();
     const members = Observable.create<EncryptionMember[] | null>(owner, null);
@@ -111,26 +198,58 @@ function editAudience(encryption: IDocEncryption, target: { colRef: number, scop
     };
     load().catch(reportError);
     return {
-      title: target.scope ? t("Who can read this column") : t("Make this column private"),
+      title: isTable ?
+        (target.scope ? t("Who can read this table") : t("Make this table private")) :
+        (target.scope ? t("Who can read this column") : t("Make this column private")),
       body: [
-        cssHint(t("Only the members you select (and you) will be able to read this column, " +
-          "and formulas that use it. Others will see 🔒 in its place.")),
+        cssHint(isTable ?
+          t(`Only the members you select (and you) will be able to read this table's data, and formulas that use it. Others will see a lock in its place. Its name, columns and number of rows stay visible.`) :
+          t(`Only the members you select (and you) will be able to read this column, and formulas that use it. Others will see a lock in its place.`)),
         dom.domComputed(members, list => list === null ? cssHint(t("Loading…")) : list.length === 0 ?
           cssHint(t("There are no other members.")) :
           list.map(m => cssRow(labeledSquareCheckbox(selected.get(m.userId)!,
-            `${m.name || m.email} (${m.email})`, testId("audience-member"))))),
+            m.name ? `${m.name} (${m.email})` : m.email, testId("audience-member"))))),
       ],
       saveLabel: target.scope ? t("Save") : t("Make private"),
       saveFunc: async () => {
         const userIds = [...selected.entries()].filter(([, obs]) => obs.get()).map(([id]) => id);
-        const result = target.scope ?
-          await encryption.setScopeAudience(target.scope, userIds) :
-          await encryption.makeColumnPrivate(target.colRef, userIds);
+        const result = target.scope ? await encryption.setScopeAudience(target.scope, userIds) :
+          isTable ? await encryption.makeTablePrivate(target.ref, userIds) :
+            await encryption.makeColumnPrivate(target.ref, userIds);
         reportSuccess(t("Saved"));
         reportKeyGrant({ granted: [], notReady: result.notReady });
       },
     };
   });
+}
+
+/**
+ * Whether the user enabled encryption on their account, for the account page (see AccountPage),
+ * with what can be done about it: enable it (without having to open or encrypt a document), or
+ * manage it in the encryption service.
+ */
+export function watchAccountEncryption(owner: MultiHolder, encryptionUserId: string | undefined) {
+  const config = getGristConfig().encryption;
+  const status = Observable.create<"loading" | "enabled" | "disabled" | "unavailable">(owner, "loading");
+  let vault: IKeyVault | undefined;
+  const refresh = async () => {
+    vault = vault ?? await (await loadEncryption()).getKeyVault(config!, encryptionUserId ?? null);
+    const enabled = await vault.hasKeys();
+    if (!owner.isDisposed()) { status.set(enabled ? "enabled" : "disabled"); }
+  };
+  if (config) {
+    refresh().catch((e) => {
+      console.warn("[encryption] Could not reach the encryption service", e);
+      if (!owner.isDisposed()) { status.set("unavailable"); }
+    });
+  }
+  return {
+    status,
+    canEnable: () => Boolean(vault?.openOnboarding),
+    enable: () => { vault?.openOnboarding?.().then(refresh).catch(reportError); },
+    canManage: () => Boolean(vault?.openSettings),
+    manage: () => vault?.openSettings?.(),
+  };
 }
 
 /** Tells who got access to keys, and who couldn't (members who haven't enabled encryption). */
@@ -139,8 +258,7 @@ export function reportKeyGrant(result: KeyGrantResult) {
     reportSuccess(t("Gave access to {{count}} member(s).", { count: result.granted.length }));
   }
   if (result.notReady.length > 0) {
-    reportWarning(t("{{members}} haven't enabled encryption on their account yet: give them access again once " +
-      "they have.", { members: result.notReady.map(m => m.name || m.email).join(", ") }));
+    reportWarning(t(`{{members}} haven't enabled encryption on their account yet: give them access again once they have.`, { members: result.notReady.map(m => m.name || m.email).join(", ") }));
   }
 }
 
@@ -160,51 +278,25 @@ export function buildPrivateColumnMarker(owner: MultiHolder, gristDoc: GristDoc,
 export function buildEncryptionSettings(owner: MultiHolder, gristDoc: GristDoc): DomContents {
   const encryption = getEncryption(gristDoc);
   if (!encryption) { return null; }
-  const version = keysVersion(owner, encryption);
-  return cssEncryptionSettings(
-    cssHint(icon("Lock"), " ", t("This document is end-to-end encrypted: its content is encrypted in " +
-      "members' browsers, and the server can't read it.")),
-    dom.domComputed(version, () => domAsync(encryption.listMembers().then(members => [
-      cssMembers(members.map(m => cssMemberRow(
-        dom("span", m.name || m.email),
-        dom("span", m.email),
-        dom("span", m.access),
-        dom("span", m.keyIds.length > 0 ? t("Can read") : t("Waiting for access")),
-        testId("encryption-member"),
-      ))),
-    ]))),
-    encryption.isOwner ? cssRow(
-      primaryButton(t("Give access to waiting members"),
-        dom.on("click", () => encryption.grantPendingKeys().then(reportKeyGrant).catch(reportError)),
-        testId("encryption-grant")),
-      basicButton(t("Replace keys"),
-        dom.on("click", () => encryption.requestKeyRotation()
-          .then(() => reportSuccess(t("Keys replaced.")))
-          .catch(reportError)),
-        testId("encryption-rotate")),
-    ) : null,
-    (encryption.isOwner && encryption.canReadAll) ? cssRow(
-      basicButton(t("Stop encrypting this document"),
-        dom.on("click", () => confirmDecryption(encryption)),
-        testId("encryption-decrypt")),
-    ) : null,
-    testId("encryption-settings"),
-  );
+  return SectionItem({
+    id: "encryption-status",
+    name: t("End-to-end encryption"),
+    description: t("Its content is encrypted in members' browsers: the server can't read it"),
+    value: (encryption.isOwner && encryption.canReadAll) ? cssSmallButton(t("Remove encryption"),
+      dom.on("click", () => confirmDecryption(encryption)),
+      testId("encryption-decrypt")) : cssStatus(icon("Lock"), t("On")),
+  });
 }
 
 function confirmDecryption(encryption: IDocEncryption) {
-  confirmModal(t("Stop encrypting this document?"), t("Stop encrypting"), () => {
-    runWithProgress(t("Making this document a regular one"),
+  confirmModal(t("Remove encryption from this document?"), t("Remove encryption"), () => {
+    runWithProgress(t("Removing encryption"),
       onProgress => encryption.decryptDocument(onProgress),
       () => window.location.reload());
   }, {
     explanation: cssExplanation(
-      dom("p", t("The document becomes a regular one: the server will be able to read it, and all of " +
-        "Grist's features become available for it.")),
-      dom("p", t("Columns that are private get access rules instead, so that members who couldn't read " +
-        "them still can't.")),
-      dom("p", t("Earlier (encrypted) versions of it are deleted. Members who have it open see that it's " +
-        "in progress, and can't change it until it's done.")),
+      dom("p", t("The server will be able to read it again.")),
+      dom("p", t("Private columns become access rules, so members who couldn't read them still can't.")),
     ),
   });
 }
@@ -219,38 +311,44 @@ export function buildEncryptDocumentSection(owner: MultiHolder, gristDoc: GristD
   const doc = docModel.currentDoc.get();
   const userId = docModel.appModel.currentValidUser?.id;
   if (!config || !doc || !userId) { return null; }
-  return cssEncryptionSettings(
-    cssHint(t("Encrypting this document end to end makes its content readable only in the browsers " +
-      "of its members: the server can't read it anymore.")),
-    cssRow(
-      basicButton(icon("Lock"), " ", t("Encrypt this document"),
-        dom.on("click", () => confirmEncryption(gristDoc, doc.id, userId, config)),
-        testId("encryption-encrypt")),
-    ),
-    testId("encryption-settings"),
-  );
+  return SectionItem({
+    id: "encryption-encrypt",
+    name: t("End-to-end encryption"),
+    description: t("Make its content readable only in members' browsers: the server can't read it anymore"),
+    value: cssSmallButton(t("Encrypt"),
+      dom.on("click", () => confirmEncryption(gristDoc, doc.id, userId, config)),
+      testId("encryption-encrypt")),
+  });
 }
 
+// First makes sure the user enabled encryption on their account (as Docs and Drive do), then asks
+// to confirm.
 function confirmEncryption(gristDoc: GristDoc, docId: string, userId: number, config: EncryptionClientConfig) {
+  loadEncryption().then(async (module) => {
+    try {
+      await module.ensureReadyToEncrypt(gristDoc.app.comm, docId, config);
+    } catch (e) {
+      // (Giving up the setup isn't an error.)
+      if (e instanceof module.SetupCancelledError) { return; }
+      throw e;
+    }
+    askToEncrypt(gristDoc, docId, userId, config);
+  }).catch(reportError);
+}
+
+function askToEncrypt(gristDoc: GristDoc, docId: string, userId: number, config: EncryptionClientConfig) {
   confirmModal(t("Encrypt this document end to end?"), t("Encrypt"), () => {
     const comm = gristDoc.app.comm;
     let summary: EncryptionSummary | undefined;
     runWithProgress(t("Encrypting this document"), async (onProgress) => {
       const module = await loadEncryption();
       summary = await module.encryptDocument(comm, docId, userId, config, onProgress,
-        vault => module.ensureVaultKeys(vault));
+        vault => module.ensureVaultKeys(vault, "encrypt"));
     }, () => showEncryptionSummary(summary));
   }, {
     explanation: cssExplanation(
-      dom("p", t("Its content will be encrypted in your browser, and only readable in the browsers of its " +
-        "members. They need to enable encryption on their account: those who did get access now, others " +
-        "once they have (when an owner opens the document).")),
-      dom("p", t("Features that need the server to read the document become unavailable: webhooks, the API " +
-        "on its data, server-side exports, and others. Access rules hiding columns from some members " +
-        "become private columns (readable by the same members); rules depending on the content (e.g. " +
-        "hiding rows) can't be kept, and rules limiting edits are dropped.")),
-      dom("p", t("Earlier versions of the document are deleted. Members who have it open see that it's in " +
-        "progress, and can't change it until it's done.")),
+      dom("p", t("Only its members' browsers will be able to read it, not the server.")),
+      dom("p", t(`Webhooks, the API and server-side exports stop working. Access rules hiding columns become private columns; rules hiding rows aren't supported (remove them first).`)),
     ),
   });
 }
@@ -262,8 +360,7 @@ function showEncryptionSummary(summary: EncryptionSummary | undefined) {
       { count: summary.privateColumns }) : null,
     summary?.droppedRules ? t("{{count}} access rule(s) limiting edits were dropped.",
       { count: summary.droppedRules }) : null,
-    summary?.waitingMembers.length ? t("{{members}} can't read it until they enable encryption and an owner " +
-      "gives them access.", { members: summary.waitingMembers.join(", ") }) : null,
+    summary?.waitingMembers.length ? t(`{{members}} can't read it until they enable encryption and an owner gives them access.`, { members: summary.waitingMembers.join(", ") }) : null,
   ].filter(Boolean);
   if (notes.length === 0) {
     window.location.reload();
@@ -325,8 +422,7 @@ export function copyEncryptedDocument(gristDoc: GristDoc, doc: Document) {
         cssRow(textInput(name, { placeholder: t("Name") }, testId("encrypted-copy-name"))),
         cssRow(labeledSquareCheckbox(asTemplate, t("As template (structure only, without data)"),
           testId("encrypted-copy-template"))),
-        cssHint(t("The copy is encrypted end to end too, with keys of its own. Private columns stay private. " +
-          "Its members (those of its workspace) can read what they could read in this document.")),
+        cssHint(t(`The copy is encrypted end to end too, with keys of its own. Private columns stay private. Its members (those of its workspace) can read what they could read in this document.`)),
       ],
       saveLabel: t("Duplicate"),
       saveDisabled: Computed.create(owner, use => !use(name).trim()),
@@ -340,8 +436,7 @@ export function copyEncryptedDocument(gristDoc: GristDoc, doc: Document) {
         }, () => {
           urlState().pushUrl({ doc: newDocId }).catch(reportError);
           if (waiting.length > 0) {
-            reportWarning(t("{{members}} can't read the copy until they enable encryption and an owner gives " +
-              "them access.", { members: waiting.join(", ") }));
+            reportWarning(t(`{{members}} can't read the copy until they enable encryption and an owner gives them access.`, { members: waiting.join(", ") }));
           }
         });
       },
@@ -367,8 +462,7 @@ export function buildEncryptedSnapshots(owner: MultiHolder, gristDoc: GristDoc):
       (canRestore && i > 0) ? basicButton(t("Restore"),
         dom.on("click", () => confirmModal(t("Restore this version?"), t("Restore"),
           () => encryption.restoreSnapshot(snapshot.actionNum),
-          { explanation: t("The document will be as it was then: changes since will be undone (they're " +
-            "still in the history, as an earlier version). Members who have it open will reload it.") })),
+          { explanation: t(`The document will be as it was then: changes since will be undone (they're still in the history, as an earlier version). Members who have it open will reload it.`) })),
         testId("encrypted-snapshot-restore")) : null,
       testId("encrypted-snapshot"),
     )))),
@@ -379,6 +473,21 @@ const cssHint = styled("div", `
   color: ${theme.lightText};
   margin: 8px 16px;
   line-height: 1.4;
+`);
+
+// A hint starting with an icon, aligned with its first line.
+const cssHintWithIcon = styled(cssHint, `
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+`);
+
+const cssHintIcon = styled(icon, `
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-top: 3px;
+  --icon-color: ${theme.lightText};
 `);
 
 const cssAudience = styled("div", `
@@ -403,19 +512,12 @@ const cssLockIcon = styled(icon, `
   flex: none;
 `);
 
-const cssEncryptionSettings = styled("div", `
-  margin: 8px 0;
-`);
-
-const cssMembers = styled("div", `
-  display: grid;
-  grid-template-columns: auto auto auto auto;
-  gap: 4px 16px;
-  margin: 8px 16px;
-`);
-
-const cssMemberRow = styled("div", `
-  display: contents;
+const cssStatus = styled("div", `
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: ${theme.controlPrimaryBg};
+  --icon-color: ${theme.controlPrimaryBg};
 `);
 
 const cssExplanation = styled("div", `
@@ -465,8 +567,7 @@ export function sendSuggestion(gristDoc: GristDoc) {
     return {
       title: t("Send your suggestion"),
       body: [
-        cssHint(t("Your changes ({{count}}) are sent to the members who can edit this document, who may apply " +
-          "them. They're undone here meanwhile.", { count: encryption.pendingSuggestionCount })),
+        cssHint(t(`Your changes ({{count}}) are sent to the members who can edit this document, who may apply them. They're undone here meanwhile.`, { count: encryption.pendingSuggestionCount })),
         cssTextArea(dom.prop("value", desc), dom.on("input", (e, elem) => desc.set(elem.value)),
           { placeholder: t("What do you suggest, and why? (optional)") }, testId("suggestion-desc")),
       ],

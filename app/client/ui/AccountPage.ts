@@ -1,3 +1,4 @@
+import { watchAccountEncryption } from "app/client/encryption/EncryptionUI";
 import { detectCurrentLang, makeT } from "app/client/lib/localization";
 import { inlineMarkdown, markdown } from "app/client/lib/markdown";
 import { checkName } from "app/client/lib/nameUtils";
@@ -27,7 +28,7 @@ import { commonUrls, getPageTitleSuffix, isFeatureEnabled } from "app/common/gri
 import { getGristConfig } from "app/common/urlUtils";
 import { AccountInfo } from "app/common/UserAPI";
 
-import { Computed, Disposable, dom, makeTestId, Observable, styled, subscribe } from "grainjs";
+import { Computed, Disposable, dom, makeTestId, MultiHolder, Observable, styled, subscribe } from "grainjs";
 
 const testId = makeTestId("test-account-page-");
 const t = makeT("AccountPage");
@@ -164,6 +165,9 @@ designed to ensure that you're the only person who can access your account, even
           dom.create(MFAConfig, user),
         ),
       ]),
+      getGristConfig().encryption ? SectionCard(t("Encryption"), [
+        dom.create(buildEncryptionContent, user.encryptionUserId),
+      ]) : null,
       SectionCard(t("Theme"), [
         isFeatureEnabled("themes") ? dom.create(ThemeConfig, this._appModel) : null,
         css.subHeader(t("Language")),
@@ -333,3 +337,26 @@ const cssFirstUpper = styled("div", `
     text-transform: capitalize;
   }
 `);
+
+// The "Encryption" section: whether end-to-end encryption is enabled on the account.
+function buildEncryptionContent(owner: MultiHolder, encryptionUserId: string | undefined) {
+  const encryption = watchAccountEncryption(owner, encryptionUserId);
+  return [
+    css.dataRow(
+      css.inlineSubHeader(t("Status")),
+      dom.domComputed(encryption.status, status => [
+        css.loginMethod(
+          status === "enabled" ? t("Enabled") :
+            status === "disabled" ? t("Not enabled") :
+              status === "unavailable" ? t("The encryption service can't be reached") : "",
+          testId("encryption-status"),
+        ),
+        (status === "enabled" && encryption.canManage()) ? css.textBtn(t("Manage"),
+          dom.on("click", () => encryption.manage()), testId("encryption-manage")) : null,
+        (status === "disabled" && encryption.canEnable()) ? css.textBtn(t("Enable encryption"),
+          dom.on("click", () => encryption.enable()), testId("encryption-enable")) : null,
+      ]),
+    ),
+    css.description(t("Needed to create end-to-end encrypted documents, and to read those shared with you.")),
+  ];
+}

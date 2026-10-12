@@ -78,16 +78,26 @@ export function getGristEngineArchive(): Promise<Buffer> {
 let _manifest: Promise<EngineManifest> | undefined;
 
 /**
- * Returns the list of packages and a version that changes whenever any engine asset does.
+ * Returns the list of packages and a version that changes whenever any engine asset does: a hash
+ * of the contents of all of them. Browsers rely on it to cache the assets for good (their URLs
+ * include it), and to reuse the memory snapshot of the engine they saved (see engineWorker.ts).
  */
 export function getEngineManifest(): Promise<EngineManifest> {
   if (!_manifest) {
     _manifest = (async () => {
       const packages = await getPyodidePackageNames();
-      const pyodideVersion = (await fse.readJson(path.join(getPyodideRuntimeDir(), "package.json"))).version;
       const hash = crypto.createHash("sha256");
-      hash.update(pyodideVersion);
-      hash.update(packages.join("\n"));
+      const addFile = async (name: string, file: string) => {
+        hash.update(`${name}\n`);
+        hash.update(await fse.readFile(file));
+      };
+      for (const file of PYODIDE_RUNTIME_FILES) {
+        await addFile(`pyodide/${file}`, path.join(getPyodideRuntimeDir(), file));
+      }
+      for (const p of packages) {
+        await addFile(`packages/${p}`, path.join(getPyodidePackagesDir(), p));
+      }
+      hash.update("grist.tar.gz\n");
       hash.update(await getGristEngineArchive());
       const version = hash.digest("hex").slice(0, 16);
       return { version, packages };

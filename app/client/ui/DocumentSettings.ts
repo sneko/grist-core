@@ -159,13 +159,10 @@ export class DocSettingsPage extends Disposable {
           ),
           disabled: isDocOwner ? false : t("Only available to document owners"),
         }) : null,
+        isEncrypted ? dom.create(buildEncryptionSettings, this._gristDoc) :
+          (isDocOwner && !isFork && getGristConfig().encryption) ?
+            dom.create(buildEncryptDocumentSection, this._gristDoc) : null,
       ]),
-
-      isEncrypted ? SectionCard(t("Encryption"), [
-        dom.create(buildEncryptionSettings, this._gristDoc),
-      ]) : (isDocOwner && !isFork && getGristConfig().encryption) ? SectionCard(t("Encryption"), [
-        dom.create(buildEncryptDocumentSection, this._gristDoc),
-      ]) : null,
 
       // (For encrypted documents, notifications can only say that the document changed, and who
       // changed it: the server can't read it.)
@@ -219,7 +216,10 @@ document is first opened, or when a document responds to changes.",
         SectionItem({
           id: "documentId",
           name: t("Document ID"),
-          description: t("ID for API use"),
+          // (For encrypted documents, the API can't read or change their content: only the
+          // document itself, e.g. its name or who it's shared with.)
+          description: isEncrypted ? t("For the API: to rename, share or delete it, not to read its content") :
+            t("ID for API use"),
           value: cssHoverWrapper(
             cssInput(docPageModel.currentDocId.get(), { tabIndex: "-1" }, clickToSelect(), readonly()),
             cssCopyButton(

@@ -40,11 +40,17 @@ export interface IDocEncryption {
   listMembers(): Promise<EncryptionMember[]>;
   getPendingMembers(): Promise<EncryptionMember[]>;
   grantPendingKeys(): Promise<KeyGrantResult>;
+  getPendingEncryption(): Promise<Map<string, { canAccept: boolean }>>;
+  acceptMember(email: string): Promise<void>;
+  setReviewMembers(review: () => void): void;
   makeColumnPrivate(colRef: number, userIds: number[]): Promise<KeyGrantResult>;
   makeColumnPublic(colRef: number): Promise<void>;
+  makeTablePrivate(tableRef: number, userIds: number[]): Promise<KeyGrantResult>;
+  makeTablePublic(tableRef: number): Promise<void>;
+  tableScope(tableRef: number): string | null;
   getScopeAudience(scope: string): Promise<EncryptionMember[]>;
   setScopeAudience(scope: string, userIds: number[]): Promise<KeyGrantResult>;
-  requestKeyRotation(scope?: string): Promise<void>;
+
   /** Imports files as new tables, parsing them in the browser. Returns the new tables' ids. */
   importFiles(files: File[]): Promise<string[]>;
   /** Imports a Google Drive file (downloaded by the browser, given the user's authorization code). */

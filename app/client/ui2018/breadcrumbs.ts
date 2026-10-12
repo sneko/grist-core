@@ -1,7 +1,8 @@
 import { kbJumperAnchor } from "app/client/components/RegionFocusSwitcher";
 import { makeT } from "app/client/lib/localization";
 import { urlState } from "app/client/models/gristUrlState";
-import { cssHideForNarrowScreen, mediaNotSmall, testId, theme } from "app/client/ui2018/cssVars";
+import { hoverTooltip } from "app/client/ui/tooltips";
+import { cssHideForNarrowScreen, mediaNotSmall, testId, theme, vars } from "app/client/ui2018/cssVars";
 import { editableLabel } from "app/client/ui2018/editableLabel";
 import { icon } from "app/client/ui2018/icons";
 import { cssLink } from "app/client/ui2018/links";
@@ -110,6 +111,29 @@ const cssTag = styled("span", `
   margin-left: 4px;
 `);
 
+// A tag with an icon: the icon is taller than the text line, so they're laid out side by side.
+// A tag with an icon, a little smaller than the text around it (so it fits the line with room).
+const cssIconTag = styled(cssTag, `
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 2px 5px;
+  font-size: ${vars.smallFontSize};
+  line-height: 1;
+  white-space: nowrap;
+  vertical-align: middle;
+  /* (Centered on the document's name next to it, which "middle" leaves a pixel above.) */
+  position: relative;
+  top: -1px;
+  --icon-color: ${theme.breadcrumbsTagFg};
+`);
+
+const cssTagIcon = styled(icon, `
+  width: 10px;
+  height: 10px;
+  flex: none;
+`);
+
 const cssAlertTag = styled(cssTag, `
   background-color: ${theme.breadcrumbsTagAlertBg};
   --icon-color: ${theme.breadcrumbsTagFg};
@@ -192,15 +216,13 @@ export function docBreadcrumbs(
       ],
     }),
     dom.maybe(options.isPublic, () => cssPublicIcon("PublicFilled", testId("bc-is-public"))),
-    options.isEncrypted ? cssTag(icon("Lock"), " ", t("encrypted"),
-      tooltip({ title: t("End-to-end encrypted: only members holding its key can read this document, " +
-        "the server can't.") }),
+    options.isEncrypted ? cssIconTag(cssTagIcon("Lock"), t("encrypted"),
+      hoverTooltip(t(`End-to-end encrypted: only members holding its key can read this document, the server can't.`)),
       testId("encrypted-tag"),
     ) : null,
     // The stand-in for the encryption service (for tests and development) uses a known key.
     (options.isEncrypted && getGristConfig().encryption?.mockVault) ? cssTag(t("INSECURE (mock)"),
-      tooltip({ title: t("This server uses a stand-in for the encryption service, with a known key: " +
-        "documents aren't actually protected. For tests and development only.") }),
+      tooltip({ title: t(`This server uses a stand-in for the encryption service, with a known key: documents aren't actually protected. For tests and development only.`) }),
       testId("encrypted-mock-tag"),
     ) : null,
     dom.domComputed((use) => {

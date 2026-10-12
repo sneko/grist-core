@@ -1,7 +1,7 @@
 /**
  * When an encrypted document becomes a regular one (see app/client/encryption/DocConversion.ts),
- * its private columns become columns hidden by access rules from the members who couldn't read
- * them, so that they still can't.
+ * its private columns and tables become columns and tables hidden by access rules from the
+ * members who couldn't read them, so that they still can't.
  */
 import { UserAction } from "app/common/DocActions";
 import { DocData } from "app/common/DocData";
@@ -20,12 +20,26 @@ export function makeAccessRuleActions(docData: DocData, privacy: ColumnPrivacy, 
     const key = keyring.currentKey(scope);
     return key && m.keyIds.includes(key.keyId);
   }));
+  // Private tables become tables hidden as a whole (rows included), and can't be changed by others.
+  const tableScopes = new Map<number, string>();
+  for (const table of docData.getMetaTable("_grist_Tables").getRecords()) {
+    const scope = keyring.currentScopeOfTable(table.id);
+    if (scope) { tableScopes.set(table.id, scope); }
+  }
   // Group columns by table and by who can read them.
-  const groups = new Map<string, { tableId: string, colIds: string[], readers: EncryptionMember[] }>();
+  const groups = new Map<string, {
+    tableId: string, colIds: string[], readers: EncryptionMember[], wholeTable?: boolean,
+  }>();
+  for (const [tableRef, scope] of tableScopes) {
+    const tableId = docData.getMetaTable("_grist_Tables").getValue(tableRef, "tableId") as string;
+    groups.set(`${tableId} *`, { tableId, colIds: ["*"], readers: readers([scope]), wholeTable: true });
+  }
   for (const column of docData.getMetaTable("_grist_Tables_column").getRecords()) {
     const table = docData.getMetaTable("_grist_Tables").getRecord(column.parentId);
     if (!table) { continue; }
-    const scopes = privacy.scopesOf(table.tableId, column.colId);
+    // (Columns of a private table only need a rule of their own if they need more keys.)
+    const tableScope = tableScopes.get(table.id);
+    const scopes = privacy.scopesOf(table.tableId, column.colId).filter(scope => scope !== tableScope);
     if (scopes.length === 0) { continue; }
     const allowed = readers(scopes);
     const key = `${table.tableId} ${allowed.map(m => m.userId).sort((a, b) => a - b).join(",")}`;
@@ -46,9 +60,10 @@ export function makeAccessRuleActions(docData: DocData, privacy: ColumnPrivacy, 
         resource: resourceIds,
         aclFormula: list.map(g => g.readers.length === 0 ? "True" :
           `user.UserID not in [${g.readers.map(m => m.userId).join(", ")}]`),
-        permissionsText: list.map(() => "-RU"),
+        permissionsText: list.map(g => g.wholeTable ? "-CRUD" : "-RU"),
         rulePos: list.map((_, i) => i + 1),
-        memo: list.map(g => `Private column (readable by ${g.readers.map(m => m.name || m.email).join(", ") || "nobody"})`),
+        memo: list.map(g => `${g.wholeTable ? "Private table" : "Private column"} ` +
+          `(readable by ${g.readers.map(m => m.name || m.email).join(", ") || "nobody"})`),
       }]];
     },
   ];

@@ -11,13 +11,15 @@ import log from "app/server/lib/log";
 
 import * as path from "path";
 
+import * as fse from "fs-extra";
+
 export async function createNodePyodideEngine(options: { verbose?: boolean } = {}): Promise<PyodideEngine> {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { loadPyodide } = require(getPyodideRuntimeDir());
   const pyodide = await loadPyodide();
   const packagesDir = getPyodidePackagesDir();
-  // Pyodide names a wheel after the last "/"-separated part of its path.
-  const packages = (await getPyodidePackageNames()).map(p => path.join(packagesDir, p).split(path.sep).join("/"));
+  const packages = await Promise.all((await getPyodidePackageNames()).map(async p =>
+    new Uint8Array(await fse.readFile(path.join(packagesDir, p)))));
   return PyodideEngine.create(pyodide, {
     packages,
     gristArchive: await getGristEngineArchive(),

@@ -12,6 +12,7 @@ export class WorkerEngine implements IDataEngine {
    * browser for as long as the server version doesn't change.
    */
   public static async create(): Promise<WorkerEngine> {
+    const start = performance.now();
     const worker = await createWorker(new URL(WORKER_BUNDLE, document.baseURI).href);
     const engine = new WorkerEngine(worker);
     try {
@@ -20,9 +21,12 @@ export class WorkerEngine implements IDataEngine {
       engine.terminate();
       throw e;
     }
+    engine.startTimings.push({ step: "started in all", ms: Math.round(performance.now() - start) });
     return engine;
   }
 
+  // How long each step of starting the engine took, in the worker.
+  public startTimings: { step: string, ms: number }[] = [];
   private _nextId = 1;
   private _pending = new Map<number, { resolve: (v: any) => void, reject: (e: Error) => void }>();
   private _ready?: { resolve: () => void, reject: (e: Error) => void };
@@ -72,6 +76,7 @@ export class WorkerEngine implements IDataEngine {
 
   private _onMessage(msg: any) {
     if (msg.type === "ready") {
+      this.startTimings = msg.timings || [];
       this._ready?.resolve();
     } else if (msg.type === "initError") {
       this._ready?.reject(new Error(`Could not load the data engine: ${msg.error}`));

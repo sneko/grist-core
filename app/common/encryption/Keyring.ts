@@ -8,7 +8,7 @@ import {
 } from "app/common/encryption/EncryptionCrypto";
 import {
   Base64, DOC_SCOPE, DocKeyInfo, DocKeyRecord, EncryptionKeysResult, KeyChangeRecord, KeyHistory, KeyHistoryEntry,
-  ScopeBinding,
+  ScopeBinding, tableTarget, targetTableRef,
 } from "app/common/encryption/EncryptionTypes";
 
 const MIN_REFRESH_INTERVAL_MS = 5000;
@@ -209,8 +209,13 @@ export class Keyring {
 
   /** The columns that are or were private (whose ids mustn't be given to new columns). */
   public boundColRefs(): number[] {
-    const all = [...this._bindings, ...(this._history?.bindings || [])];
-    return [...new Set(all.map(b => b.colRef))].sort((a, b) => a - b);
+    return this._boundTargets().filter(t => t > 0);
+  }
+
+  /** The tables that are or were private (whose ids mustn't be given to new tables). */
+  public boundTableRefs(): number[] {
+    return this._boundTargets().map(t => targetTableRef(t)).filter((t): t is number => t !== null)
+      .sort((a, b) => a - b);
   }
 
   /** Column scopes that were made public again (and aren't used anymore), as members recorded. */
@@ -220,7 +225,12 @@ export class Keyring {
     return [...new Set(bindings.filter(b => b.releasedAt !== null && !active.has(b.scope)).map(b => b.scope))];
   }
 
-  /** The scope protecting a column now, if it's private. */
+  /** The scope protecting a table now, if it's private (see tableTarget()). */
+  public currentScopeOfTable(tableRef: number): string | null {
+    return this.currentScopeOf(tableTarget(tableRef));
+  }
+
+  /** The scope protecting a column now, if it's private itself (not counting its table). */
   public currentScopeOf(colRef: number): string | null {
     const binding = (this._history?.bindings || []).find(b => b.colRef === colRef && b.releasedAt === null) ??
       this._bindings.find(b => b.colRef === colRef && b.releasedAt === null);
@@ -311,6 +321,11 @@ export class Keyring {
       }
     }
     return found;
+  }
+
+  private _boundTargets(): number[] {
+    const all = [...this._bindings, ...(this._history?.bindings || [])];
+    return [...new Set(all.map(b => b.colRef))].sort((a, b) => a - b);
   }
 }
 

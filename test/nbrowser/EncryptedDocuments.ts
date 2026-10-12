@@ -253,7 +253,8 @@ describe("EncryptedDocuments", function() {
       const ws = (await ownerApi.getOrgWorkspaces("current"))[0].id;
       docId = await ownerApi.newDoc({ name: "Staff", options: { encryption: { version: 1 } } }, ws);
       cleanup.addAfterAll(() => ownerApi.deleteDoc(docId));
-      await ownerApi.updateDocPermissions(docId, { users: { [editor.email]: "editors", [other.email]: "editors" } });
+      // (The editor is added later, to see them wait for the key.)
+      await ownerApi.updateDocPermissions(docId, { users: { [other.email]: "editors" } });
 
       // The owner sets up the document.
       ownerWindow = await driver.getWindowHandle();
@@ -280,24 +281,25 @@ describe("EncryptedDocuments", function() {
       await switchTo(ownerWindow);
     });
 
-    it("gives the key to members, from the document's settings", async function() {
-      // A member who wasn't given the key yet waits for it.
+    it("lets owners accept members waiting for the key, from the sharing dialog", async function() {
+      // A member added while the owner has the document open waits for the key.
+      await ownerApi.updateDocPermissions(docId, { users: { [editor.email]: "editors" } });
       editorWindow = await openInNewWindow("user2", { wait: false });
       await driver.findContentWait(".test-modal-dialog", /Waiting for access/, ENGINE_LOAD_MS);
+      // Meanwhile, the page says the document is being opened.
+      assert.match(await driver.find(".test-encrypted-doc-loader").getText(), /Opening the encrypted document/);
 
-      // The owner gives it to members waiting for it.
+      // The owner accepts them in the sharing dialog (they enabled encryption), along with
+      // members added before.
       await switchTo(ownerWindow);
-      await driver.find(".test-tools-settings").click();
-      await driver.findWait(".test-encryption-settings", 5000);
-      await gu.waitToPass(async () => {
-        assert.include(await driver.find(".test-encryption-settings").getText(), editor.email);
-      });
-      await driver.find(".test-encryption-grant").click();
-      await driver.findContentWait(".test-notifier-toast-wrapper", /Gave access to [1-9]\d* member/, 10000);
+      await driver.find(".test-tb-share").click();
+      await driver.findContentWait(".test-tb-share-option", /Manage users/, 2000).click();
+      await acceptAllInSharingDialog();
 
       // The member's document opens.
       await switchTo(editorWindow);
       await gu.waitForDocToLoad(ENGINE_LOAD_MS);
+      assert.isFalse(await driver.find(".test-encrypted-doc-loader").isPresent());
       await gu.openPage("Staff");
       assert.deepEqual(await gu.getVisibleGridCells({ cols: ["Name", "Salary", "Total"], rowNums: [1, 2] }),
         ["Ana", "52100", "52800", "Ben", "61300", "62200"]);
@@ -315,6 +317,11 @@ describe("EncryptedDocuments", function() {
       await driver.find(".test-modal-confirm").click();
       await gu.waitForServer();
       await driver.findWait(".test-column-private", 5000);
+      // Who can read it, the owner first noted as such.
+      await gu.waitToPass(async () => {
+        const audience = await driver.findAll(".test-column-audience-member", e => e.getText());
+        assert.include(audience, "Chimpy (you)");
+      }, 5000);
       assert.isTrue(await gu.getColumnHeader({ col: "Salary" }).find(".test-column-private-marker").isPresent());
       assert.isTrue(await gu.getColumnHeader({ col: "Total" }).find(".test-column-private-marker").isPresent());
       assert.isFalse(await gu.getColumnHeader({ col: "Bonus" }).find(".test-column-private-marker").isPresent());
@@ -414,6 +421,52 @@ describe("EncryptedDocuments", function() {
       }, 10000);
       assert.include(await readableWithDocKeys(docId), "70000");
     });
+
+    it("lets the owner make a whole table private", async function() {
+      await switchTo(ownerWindow);
+      await gu.sendActions([
+        ["AddTable", "Payroll", [{ id: "Who", type: "Text", isFormula: false },
+          { id: "Amount", type: "Numeric", isFormula: false }]],
+        ["BulkAddRecord", "Payroll", [null, null], { Who: ["Ana", "Ben"], Amount: [3100, 4200] }],
+      ]);
+      await gu.openPage("Payroll");
+      await gu.openWidgetPanel("data");
+      for (const close of await driver.findAll(".test-notifier-toast-close")) { await close.click(); }
+      await driver.findWait(".test-table-make-private", 5000).click();
+      // Readable by the owner and the editor.
+      await driver.findContentWait(".test-modal-dialog label", new RegExp(`^${editor.name} `), 5000).click();
+      await driver.find(".test-modal-confirm").click();
+      await driver.findWait(".test-table-private", 10000);
+      assert.includeMembers(await driver.findAll(".test-table-audience-member", e => e.getText()), ["Chimpy (you)"]);
+      // A column added later is private too, and its settings say why.
+      await gu.sendActions([["AddVisibleColumn", "Payroll", "Note", { type: "Text", isFormula: false }],
+        ["UpdateRecord", "Payroll", 1, { Note: "raise" }]]);
+      await gu.openColumnPanel("Note");
+      await driver.findWait(".test-column-private-table", 5000);
+
+      await switchTo(editorWindow);
+      await gu.openPage("Payroll");
+      await gu.waitToPass(async () => {
+        assert.deepEqual(await gu.getVisibleGridCells({ cols: ["Who", "Amount", "Note"], rowNums: [1] }),
+          ["Ana", "3100", "raise"]);
+      }, 10000);
+      // The other member gets new values locked; what they already had stays in the document they
+      // have open, but once they open it again, they can't read any of it.
+      await switchTo(otherWindow);
+      await gu.openPage("Payroll");
+      await gu.waitToPass(async () => {
+        assert.equal(await gu.getCell({ col: "Note", rowNum: 1 }).getText(), "🔒");
+      }, 10000);
+      await driver.navigate().refresh();
+      await gu.waitForDocToLoad(ENGINE_LOAD_MS);
+      await gu.openPage("Payroll");
+      assert.deepEqual(await gu.getVisibleGridCells({ cols: ["Who", "Amount", "Note"], rowNums: [1, 2] }),
+        ["🔒", "🔒", "🔒", "🔒", "🔒", ""]);
+      const readable = await readableWithDocKeys(docId);
+      for (const secret of ["3100", "4200", "raise"]) {
+        assert.notInclude(readable, secret);
+      }
+    });
   });
 
   describe("whole documents", function() {
@@ -501,12 +554,10 @@ describe("EncryptedDocuments", function() {
       await gu.getCell({ col: "A", rowNum: 1 }).click();
       await gu.enterCell("gamma");
       await gu.waitForServer();
-      // Replacing keys saves a version under the new keys.
-      await driver.find(".test-tools-settings").click();
-      for (const close of await driver.findAll(".test-notifier-toast-close")) { await close.click(); }
-      await driver.findWait(".test-encryption-rotate", 5000).click();
-      await driver.findContentWait(".test-notifier-toast-wrapper", /Keys replaced/, 10000);
-      await gu.openPage("Table1");
+      // Removing a member who could read it replaces keys on the next edit, which saves a version
+      // under the new keys.
+      await ownerApi.updateDocPermissions(docId, { users: { [gu.translateUser("user3").email]: null } });
+      await listMembers();
       await gu.getCell({ col: "A", rowNum: 1 }).click();
       await gu.enterCell("delta");
       await gu.waitForServer();
@@ -593,18 +644,14 @@ describe("EncryptedDocuments", function() {
       await owner.loadDoc(`/doc/${docId}`, { wait: false });
       await gu.waitForDocToLoad(ENGINE_LOAD_MS);
       await gu.sendActions([["BulkAddRecord", "Table1", [null], { A: ["draft"] }]]);
-      // The viewer gets the document's key.
-      await driver.find(".test-tools-settings").click();
-      await driver.findWait(".test-encryption-grant", 5000);
+      // Opening it, the owner is told the viewer waits to be accepted, and accepts them.
+      await driver.findContentWait(".test-notifier-toast-wrapper", /waiting for you to accept them/, 10000);
+      await driver.findContent(".test-notifier-toast-custom-action", /Review/i).click();
+      await acceptAllInSharingDialog();
       await driver.switchTo().newWindow("tab");
       viewerWindow = await driver.getWindowHandle();
       const session = await gu.session().user("user3").teamSite.addLogin();
       await session.loadDoc(`/doc/${docId}`, { wait: false });
-      await driver.findContentWait(".test-modal-dialog", /Waiting for access/, ENGINE_LOAD_MS);
-      await driver.switchTo().window(ownerWindow);
-      await driver.find(".test-encryption-grant").click();
-      await driver.findContentWait(".test-notifier-toast-wrapper", /Gave access/, 10000);
-      await driver.switchTo().window(viewerWindow);
       await gu.waitForDocToLoad(ENGINE_LOAD_MS);
     });
 
@@ -651,4 +698,35 @@ describe("EncryptedDocuments", function() {
       await driver.switchTo().window(ownerWindow);
     });
   });
+
+  describe("account", function() {
+    it("shows whether encryption is enabled on the account", async function() {
+      await gu.session().user("user1").teamSite.login();
+      await gu.openProfileSettingsPage();
+      assert.equal(await driver.findWait(".test-account-page-encryption-status", 5000).getText(), "Enabled");
+    });
+  });
 });
+
+// In the sharing dialog: accepts all members waiting for the key (at least one), then closes it.
+async function acceptAllInSharingDialog() {
+  await driver.findWait(".test-um-member-accept-encryption", 5000);
+  while (await driver.find(".test-um-member-accept-encryption").isPresent()) {
+    const count = (await driver.findAll(".test-um-member-accept-encryption")).length;
+    await driver.find(".test-um-member-accept-encryption").click();
+    await gu.waitToPass(async () => {
+      assert.lengthOf(await driver.findAll(".test-um-member-accept-encryption"), count - 1);
+    }, 10000);
+  }
+  await driver.find(".test-um-cancel").click();
+}
+
+// Lists members, which takes keys away from those who lost access (as the sharing dialog does).
+async function listMembers() {
+  const result = await driver.executeAsyncScript(`
+    const done = arguments[arguments.length - 1];
+    window.gristDocPageModel.gristDoc.get().docComm.encryption.listMembers()
+      .then(() => done({})).catch(e => done({ error: String(e) }));
+  `) as any;
+  assert.isUndefined(result.error);
+}

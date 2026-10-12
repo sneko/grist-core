@@ -19,7 +19,6 @@ import {
   copyDocument, decryptDocument, makeFormAnswerHelpers, makeVaultIdFor, ProgressCallback,
 } from "app/client/encryption/DocConversion";
 import { downloadFromDrive, driveFileIdFromUrl } from "app/client/encryption/driveImport";
-import { reportKeyGrant } from "app/client/encryption/EncryptionUI";
 import { getKeyVault } from "app/client/encryption/keyVaults";
 import { getLocalAssistance } from "app/client/encryption/localAssistant";
 import { isLockedHere, lockingHere, showLockOverlay } from "app/client/encryption/lockOverlay";
@@ -50,7 +49,7 @@ import {
   Base64, DOC_SCOPE, DocKeyRecord, DocLockInfo, ENCRYPTED_PART_BYTES, EncryptedActionRecord, EncryptedDocOpenResult,
   EncryptedInboxEntry, EncryptedPushResult, EncryptedSnapshotInfo, EncryptedSnapshotRecord, EncryptedSuggestion,
   EncryptionKeysResult,
-  EncryptionMember, makeColumnScope, makeKeyId, NewKeyRequest, PayloadSource,
+  EncryptionMember, makeColumnScope, makeKeyId, NewKeyRequest, PayloadSource, tableTarget,
 } from "app/common/encryption/EncryptionTypes";
 import {
   buildFormSpec, getFormScopes, getFormShareOptions, getPublishedForms, readFormAnswers,
@@ -65,7 +64,7 @@ import { EncryptionClientConfig } from "app/common/gristUrls";
 import { User } from "app/common/User";
 
 import { Semaphore } from "async-mutex";
-import { Disposable, dom, Emitter } from "grainjs";
+import { Disposable, dom, Emitter, Observable } from "grainjs";
 import isEqual from "lodash/isEqual";
 import omit from "lodash/omit";
 
@@ -151,8 +150,6 @@ export class CommRelay implements IEncryptionRelay {
     return this._call("revokeEncryptionKeys", userIds, scope);
   }
 
-  public requestRotation(scope: string): Promise<void> { return this._call("requestKeyRotation", scope); }
-
   public async uploadFile(ciphertext: Uint8Array): Promise<{ fileId: string }> {
     return this._call("uploadEncryptedFile", await this._send(ciphertext));
   }
@@ -212,15 +209,23 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
   ): Promise<{ session: EncryptedDocSession, openResponse: OpenLocalDocResult }> {
     const relay = new CommRelay(comm, docId);
     const cancellation = new Cancellation(options.isCancelled);
+    const timings = new OpenTimings(docId);
+    // The data engine takes longest to start, and needs nothing from the steps before using it:
+    // start it right away.
+    const startingEngine = WorkerEngine.create();
+    startingEngine.catch(() => {});   // (Reported when awaited below.)
     let engine: WorkerEngine | undefined;
     let session: EncryptedDocSession | undefined;
     try {
       let openResult = await relay.open();
+      timings.step("server open");
       cancellation.check();
       const vault = await getKeyVault(config, openResult.user.vaultUserId);
+      timings.step("load encryption service");
       while (!await vault.hasKeys()) {
         await promptKeySetup(vault, cancellation);
       }
+      timings.step("check keys");
       const vaultIdFor = makeVaultIdFor(config);
 
       const keyring = new Keyring(vault, () => relay.getKeys(), openResult);
@@ -239,15 +244,24 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
         keyring.update(openResult);
       }
 
-      engine = await WorkerEngine.create();
+      timings.step("get document key");
+      engine = await startingEngine;
+      timings.step("wait for engine (Pyodide, started first)", engine.startTimings);
       cancellation.check();
       session = new EncryptedDocSession(comm, docId, relay, keyring, engine, openResult, vaultIdFor, config);
-      await session._open(openResult, Boolean(options.canSuggest));
+      await session._open(openResult, Boolean(options.canSuggest), step => timings.step(step));
       cancellation.check();
-      return { session, openResponse: await session._makeOpenResponse(openResult) };
+      const openResponse = await session._makeOpenResponse(openResult);
+      timings.step("prepare for display");
+      session.openTimings = timings.done();
+      return { session, openResponse };
     } catch (e) {
       // Don't leave the data engine running, nor the server sending us changes.
-      if (session) { session.dispose(); } else { engine?.terminate(); }
+      if (session) {
+        session.dispose();
+      } else {
+        startingEngine.then(e => e.terminate()).catch(() => {});
+      }
       relay.close().catch(() => {});
       throw e;
     } finally {
@@ -256,11 +270,14 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
   }
 
   public readonly docFD = _nextDocFD--;
+  // How long each step of opening the document took (see OpenTimings).
+  public openTimings: OpenStepTiming[] = [];
   // Emitted when keys or members change, or which columns are private.
   public readonly keysChanged = this.autoDispose(new Emitter());
   // Emitted when suggestions are added or handled, or when changes are made while suggesting.
   public readonly suggestionsChanged = this.autoDispose(new Emitter());
 
+  private _reviewMembers?: () => void;
   private _localDoc: LocalActiveDoc;
   // Changes from others are held back until the document is shown (see resume()).
   private _paused = true;
@@ -420,6 +437,29 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     return { granted: [...granted], notReady: [...notReady, ...ready.filter(m => !granted.has(m))] };
   }
 
+  /**
+   * For the sharing dialog: members who can't read the document yet, by email, with whether they
+   * enabled encryption since (so an owner can accept them, see acceptMember()).
+   */
+  public async getPendingEncryption(): Promise<Map<string, { canAccept: boolean }>> {
+    const { ready, notReady } = await this._splitByReadiness(await this.getPendingMembers());
+    return new Map([
+      ...notReady.map(m => [m.email, { canAccept: false }] as const),
+      ...ready.map(m => [m.email, { canAccept: this.isOwner }] as const),
+    ]);
+  }
+
+  /** How to open the sharing dialog, where owners accept members (set by the share menu). */
+  public setReviewMembers(review: () => void) { this._reviewMembers = review; }
+
+  /** Gives the document's keys to a member waiting for them (see getPendingEncryption()). */
+  public async acceptMember(email: string): Promise<void> {
+    const member = (await this.getPendingMembers()).find(m => m.email === email);
+    if (!member) { return; }
+    const { granted } = await this.shareScope(DOC_SCOPE, [member]);
+    if (granted.length === 0) { throw new Error(t("They haven't enabled encryption on their account yet.")); }
+  }
+
   /** Gives the document's keys to members who have access to it but can't read it yet. */
   public async grantPendingKeys(): Promise<KeyGrantResult> {
     return this.shareScope(DOC_SCOPE, await this.getPendingMembers());
@@ -431,27 +471,30 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
    * had of them in readable form (older changes and snapshots).
    */
   public async makeColumnPrivate(colRef: number, userIds: number[]): Promise<KeyGrantResult> {
-    const members = await this.listMembers();
-    const chosen = members.filter(m => m.userId === this.userId || userIds.includes(m.userId));
-    const { ready, notReady } = await this._splitByReadiness(chosen);
-    if (!ready.some(m => m.userId === this.userId)) {
-      throw new Error(t("Your account is not known to the encryption service"));
-    }
-    const recipients: (KeyRecipient & { userId: number })[] = ready.map(m =>
-      ({ userId: m.userId, vaultUserId: this._vaultIdFor(m)!, email: m.email, name: m.name }));
-    // Values shared so far were readable by all members: keep only the private version (saved
-    // along with the key change).
-    await this._localDoc.createScopeKey(makeColumnScope(), recipients, colRef, { compact: true });
-    this.keysChanged.emit();
-    return { granted: ready.filter(m => m.userId !== this.userId), notReady };
+    return this._makePrivate(colRef, userIds);
   }
 
   /** Makes a private column readable by all members again. */
   public async makeColumnPublic(colRef: number): Promise<void> {
-    const scope = this._keyring.currentScopeOf(colRef);
-    if (!scope) { return; }
-    await this._localDoc.releaseScope(scope);
-    this.keysChanged.emit();
+    return this._makePublic(this._keyring.currentScopeOf(colRef));
+  }
+
+  /**
+   * Makes a whole table private, like a column (see makeColumnPrivate()): all its columns,
+   * including those added later. Its structure (name, columns, number of rows) stays visible.
+   */
+  public async makeTablePrivate(tableRef: number, userIds: number[]): Promise<KeyGrantResult> {
+    return this._makePrivate(tableTarget(tableRef), userIds);
+  }
+
+  /** Makes a private table readable by all members again. */
+  public async makeTablePublic(tableRef: number): Promise<void> {
+    return this._makePublic(this._keyring.currentScopeOfTable(tableRef));
+  }
+
+  /** The scope of a private table (null if it isn't). */
+  public tableScope(tableRef: number): string | null {
+    return this._keyring.currentScopeOfTable(tableRef);
   }
 
   /**
@@ -478,13 +521,6 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
   public async getScopeAudience(scope: string): Promise<EncryptionMember[]> {
     const current = this._keyring.currentKey(scope);
     return (await this.listMembers()).filter(m => current && m.keyIds.includes(current.keyId));
-  }
-
-  /** Asks for the document's keys to be replaced (on the next edit). */
-  public async requestKeyRotation(scope: string = DOC_SCOPE): Promise<void> {
-    await this._relay.requestRotation(scope);
-    await this._localDoc.refreshKeys();
-    await this._localDoc.rotateKeys();
   }
 
   /**
@@ -719,6 +755,29 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
   }
 
   // Members who set up their keys with the encryption service (who can be given keys), and others.
+  // Makes a column or table private (see tableTarget()) to the given members and the user.
+  private async _makePrivate(target: number, userIds: number[]): Promise<KeyGrantResult> {
+    const members = await this.listMembers();
+    const chosen = members.filter(m => m.userId === this.userId || userIds.includes(m.userId));
+    const { ready, notReady } = await this._splitByReadiness(chosen);
+    if (!ready.some(m => m.userId === this.userId)) {
+      throw new Error(t("Your account is not known to the encryption service"));
+    }
+    const recipients: (KeyRecipient & { userId: number })[] = ready.map(m =>
+      ({ userId: m.userId, vaultUserId: this._vaultIdFor(m)!, email: m.email, name: m.name }));
+    // Values shared so far were readable by all members: keep only the private version (saved
+    // along with the key change).
+    await this._localDoc.createScopeKey(makeColumnScope(), recipients, target, { compact: true });
+    this.keysChanged.emit();
+    return { granted: ready.filter(m => m.userId !== this.userId), notReady };
+  }
+
+  private async _makePublic(scope: string | null): Promise<void> {
+    if (!scope) { return; }
+    await this._localDoc.releaseScope(scope);
+    this.keysChanged.emit();
+  }
+
   private async _splitByReadiness(members: EncryptionMember[]) {
     const known = members.filter(m => this._vaultIdFor(m));
     const registered = known.length === 0 ? new Set<string>() :
@@ -735,7 +794,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     return { data: await decryptFile(this._keyring, ref, ciphertext), fileName: record.fileName };
   }
 
-  private async _open(openResult: EncryptedDocOpenResult, canSuggest: boolean) {
+  private async _open(openResult: EncryptedDocOpenResult, canSuggest: boolean, onOpenStep: (step: string) => void) {
     const user = openResult.user;
     this._localDoc = await LocalActiveDoc.open({
       engine: this._engine,
@@ -752,6 +811,11 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
         locale: navigator.language || "en-US",
       } : undefined,
       onInvalidChange: change => this._onInvalidChange(change),
+      onOpenStep,
+      onRotationFailed: (e) => {
+        console.warn("[encryption] Could not replace keys", e);
+        reportMessage(t(`Keys couldn't be replaced after a member lost access: it will be tried again on your next change.`), { level: "warning", key: "encryption-rotation-failed" });
+      },
       log: (...args) => console.log("[encryption]", ...args),
     }, openResult);
     this._comm.listenTo(this._comm, "encryptedDocAction", this._onDocAction);
@@ -917,23 +981,56 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     }
   }
 
-  // Like Docs, give keys to members who are waiting for them when an owner opens the document.
+  // When an owner opens the document: let them know of members who enabled encryption since being
+  // added, and wait for the owner to accept them in the sharing dialog. Accepting is explicit, so
+  // the owner can check a member's key (e.g. with them) before giving them access.
   private async _offerPendingKeys() {
     if (!this.isOwner) { return; }
-    const pending = (await this.getPendingMembers()).filter(m => this._vaultIdFor(m));
-    if (pending.length === 0 || this.isDisposed()) { return; }
-    reportMessage(() => dom("div",
-      t("{{count}} member(s) can't read this encrypted document yet.", { count: pending.length }),
-    ), {
+    const { ready } = await this._splitByReadiness(await this.getPendingMembers());
+    if (ready.length === 0 || this.isDisposed()) { return; }
+    reportMessage(t("{{count}} member(s) enabled encryption and are waiting for you to accept them.",
+      { count: ready.length }), {
       key: "encryption-pending-keys",
       level: "info",
+      // (How to open the sharing dialog is known by the time this is clicked.)
       actions: [{
-        label: t("Give access"),
-        action: () => {
-          this.grantPendingKeys().then(reportKeyGrant).catch(reportError);
-        },
+        label: t("Review"),
+        action: () => this._reviewMembers?.(),
       }],
     });
+  }
+}
+
+export interface OpenStepTiming { step: string, ms: number }
+
+/**
+ * Measures the steps of opening an encrypted document: shown in the browser's performance panel
+ * (as "encryption: <step>"), and summed up in the console.
+ */
+class OpenTimings {
+  private _start = performance.now();
+  private _last = this._start;
+  private _steps: OpenStepTiming[] = [];
+
+  constructor(private _docId: string) {}
+
+  public step(name: string, details: OpenStepTiming[] = []) {
+    const now = performance.now();
+    this._steps.push({ step: name, ms: Math.round(now - this._last) });
+    this._steps.push(...details.map(d => ({ step: `  ${d.step}`, ms: d.ms })));
+    try {
+      performance.measure(`encryption: ${name}`, { start: this._last, end: now });
+    } catch (e) {
+      // (Older browsers: the console summary is enough.)
+    }
+    this._last = now;
+  }
+
+  public done(): OpenStepTiming[] {
+    const total = Math.round(this._last - this._start);
+    console.info(`[encryption] Opened ${this._docId} in ${total} ms:\n` +
+      this._steps.map(s => `  ${String(s.ms).padStart(6)} ms  ${s.step}`).join("\n"));
+    return [...this._steps, { step: "total", ms: total }];
   }
 }
 
@@ -995,34 +1092,60 @@ class Cancellation {
   }
 }
 
+/** Thrown when the user gives up setting up their encryption keys (see ensureVaultKeys()). */
+export class SetupCancelledError extends Error {
+  constructor() { super("Encryption setup cancelled"); }
+}
+
 /** Makes sure the user set up their encryption keys, asking them to (until they did or gave up). */
-export async function ensureVaultKeys(vault: IKeyVault): Promise<void> {
+export async function ensureVaultKeys(vault: IKeyVault, purpose: "open" | "encrypt" = "open"): Promise<void> {
   const cancellation = new Cancellation();
   try {
-    while (!await vault.hasKeys()) { await promptKeySetup(vault, cancellation); }
+    while (!await vault.hasKeys()) { await promptKeySetup(vault, cancellation, purpose); }
   } finally {
     cancellation.dispose();
   }
 }
 
-/** Shows a dialog until the user has set up their encryption keys (or gives up). */
-function promptKeySetup(vault: IKeyVault, cancellation: Cancellation): Promise<void> {
+/**
+ * Shows a dialog until the user has set up their encryption keys (or gives up). The encryption
+ * service's setup opens from it, and the dialog closes as soon as the setup is done.
+ */
+function promptKeySetup(vault: IKeyVault, cancellation: Cancellation,
+  purpose: "open" | "encrypt" = "open"): Promise<void> {
   return new Promise((resolve, reject) => {
     modal((ctl, owner) => {
+      const busy = Observable.create(owner, false);
       cancellation.whenCancelled.catch((e: Error) => {
         if (!owner.isDisposed()) { ctl.close(); }
         reject(e);
       });
+      const setUp = async () => {
+        busy.set(true);
+        try {
+          if (await vault.openOnboarding!() || await vault.hasKeys()) {
+            ctl.close();
+            resolve();
+          }
+        } finally {
+          if (!owner.isDisposed()) { busy.set(false); }
+        }
+      };
       return [
         cssModalTitle(t("Enable encryption")),
-        cssModalBody(t("This document is encrypted. You must enable encryption on your account to access it.")),
+        cssModalBody(purpose === "encrypt" ?
+          t("To encrypt a document, first enable encryption on your account.") :
+          t("This document is encrypted. You must enable encryption on your account to access it.")),
         cssModalButtons(
-          vault.openOnboarding ? bigPrimaryButton(t("Enable encryption"),
-            dom.on("click", () => vault.openOnboarding!())) : null,
-          bigBasicButton(t("Continue"), dom.on("click", () => { ctl.close(); resolve(); })),
+          vault.openOnboarding ?
+            bigPrimaryButton(t("Enable encryption"), dom.boolAttr("disabled", busy),
+              dom.on("click", () => { setUp().catch(reportError); })) :
+            // (Without the service's setup at hand: once done elsewhere, check again.)
+            bigPrimaryButton(t("Check again"), dom.on("click", () => { ctl.close(); resolve(); })),
           bigBasicButton(t("Cancel"), dom.on("click", () => {
             ctl.close();
-            reject(new Error(t("Encryption keys are required to open this document")));
+            reject(purpose === "encrypt" ? new SetupCancelledError() :
+              new Error(t("Encryption keys are required to open this document")));
           })),
         ),
       ];
@@ -1059,8 +1182,7 @@ function waitForKey(comm: Comm, docId: string, relay: CommRelay, openResult: Enc
       return [
         cssModalTitle(t("Waiting for access")),
         cssModalBody(openResult.keys.length > 0 ?
-          t("This document is encrypted. You have access to it, but not yet to its key: " +
-            "it will open as soon as an owner opens it and gives you access.") :
+          t(`This document is encrypted. You have access to it, but not yet to its key: it will open as soon as an owner opens it and gives you access.`) :
           t("This document is encrypted, and its owner hasn't set it up yet. It will open as soon as they do.")),
         cssModalButtons(
           bigBasicButton(t("Cancel"), dom.on("click", () => {

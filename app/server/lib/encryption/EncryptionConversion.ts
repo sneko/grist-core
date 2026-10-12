@@ -29,7 +29,7 @@ import { TableDataAction } from "app/common/DocActions";
 import { marshalValue, unmarshalValue } from "app/common/encryption/EncryptedPayloads";
 import { gunzip, gzip } from "app/common/encryption/EncryptionCrypto";
 import {
-  Base64, DOC_SCOPE, DocKeyRecord, EncryptionMember, isEncryptedDoc, PayloadSource,
+  Base64, DOC_SCOPE, DocKeyRecord, EncryptionMember, isEncryptedDoc, isValidTarget, PayloadSource, tableTarget,
 } from "app/common/encryption/EncryptionTypes";
 import { schema } from "app/common/schema";
 import { Document } from "app/gen-server/entity/Document";
@@ -59,8 +59,8 @@ import * as crypto from "crypto";
 import * as fse from "fs-extra";
 
 /**
- * A column that access rules hide from some members, which becomes private to those who can read
- * it (see beginEncryption()).
+ * A column or table that access rules hide from some members, which becomes private to those who
+ * can read it (see beginEncryption()). colRef is a binding target (see tableTarget()).
  */
 export interface ColumnAudience {
   colRef: number;
@@ -83,7 +83,7 @@ export interface DocEncryptionStart {
   attachments: { rowId: number, size: number }[];
   // Members of the document (who can be given its key).
   members: Omit<EncryptionMember, "keyIds">[];
-  // Columns that access rules hide from some members: they become private to the others.
+  // Columns and tables that access rules hide from some members: they become private to the others.
   columnAudiences: ColumnAudience[];
   // How many access rules were about something else than reading (e.g. limiting edits), which
   // encrypted documents can't enforce.
@@ -238,7 +238,7 @@ export class EncryptionConversion {
     for (const key of columnKeys) {
       if (typeof key?.scope !== "string" || !/^column:[a-z0-9]{1,64}$/.test(key.scope) ||
         typeof key.keyId !== "string" || !key.keyId.startsWith(`${key.scope}~`) || key.keyId.length > 200 ||
-        !Number.isInteger(key.colRef) || key.colRef <= 0 || colRefs.has(key.colRef)) {
+        !isValidTarget(key.colRef) || colRefs.has(key.colRef)) {
         throw new ApiError("Invalid column key", 400);
       }
       colRefs.add(key.colRef);
@@ -397,8 +397,8 @@ export class EncryptionConversion {
   }
 
   /**
-   * Works out what access rules mean for each member: columns they hide from some members become
-   * private to the others (with keys of their own, see commitEncryption()). Rules depending on
+   * Works out what access rules mean for each member: tables and columns they hide from some
+   * members become private to the others (with keys of their own, see commitEncryption()). Rules depending on
    * the content (e.g. hiding some rows, or some cells) can't be converted: the document can't be
    * encrypted then. Nor can it by an owner who can't read all of it.
    */
@@ -417,7 +417,13 @@ export class EncryptionConversion {
       throw new ApiError("Only owners who can read all of a document can encrypt it", 403);
     }
     const system = getDocLock(activeDoc.docName)!.session!;
-    const hidden = new Map<number, Set<number>>();   // colRef -> userIds who can't read it
+    // What each member can't read, by binding target (see tableTarget()): tables hidden as a
+    // whole become private tables, other hidden columns private columns.
+    const hidden = new Map<number, Set<number>>();   // target -> userIds who can't read it
+    const hide = (target: number, userId: number) => {
+      if (!hidden.has(target)) { hidden.set(target, new Set()); }
+      hidden.get(target)!.add(userId);
+    };
     const columns = docData.getMetaTable("_grist_Tables_column");
     for (const table of docData.getMetaTable("_grist_Tables").getRecords()) {
       // Summary tables follow their source table.
@@ -434,16 +440,19 @@ export class EncryptionConversion {
         const unconvertible = () => new ApiError(`Access rules of table ${table.tableId} depend on its content ` +
           `(e.g. hiding rows or cells from ${member.email}): they can't be kept in an encrypted document. ` +
           "Remove them first (columns can be made private instead, once encrypted)", 400);
-        if (seen && seen[2].length !== full[2].length) { throw unconvertible(); }
+        if (!seen) {
+          hide(tableTarget(table.id), member.userId);
+          continue;
+        }
+        if (seen[2].length !== full[2].length) { throw unconvertible(); }
         for (const col of columns.filterRecords({ parentId: table.id })) {
           if (col.colId === "id") { continue; }
-          const values = seen?.[3][col.colId];
-          if (seen && values) {
+          const values = seen[3][col.colId];
+          if (values) {
             if (values.some(v => Array.isArray(v) && v[0] === GristObjCode.Censored)) { throw unconvertible(); }
             continue;
           }
-          if (!hidden.has(col.id)) { hidden.set(col.id, new Set()); }
-          hidden.get(col.id)!.add(member.userId);
+          hide(col.id, member.userId);
         }
       }
     }

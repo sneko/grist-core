@@ -4,5 +4,6 @@
  */
 export { EncryptedDocComm } from "app/client/encryption/EncryptedDocComm";
 export { EncryptedDocSession } from "app/client/encryption/EncryptedDocSession";
-export { encryptDocument } from "app/client/encryption/DocConversion";
-export { ensureVaultKeys } from "app/client/encryption/EncryptedDocSession";
+export { encryptDocument, ensureReadyToEncrypt } from "app/client/encryption/DocConversion";
+export { ensureVaultKeys, SetupCancelledError } from "app/client/encryption/EncryptedDocSession";
+export { getKeyVault } from "app/client/encryption/keyVaults";

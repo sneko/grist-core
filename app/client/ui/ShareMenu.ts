@@ -60,6 +60,8 @@ export function buildShareMenuButton(pageModel: DocPageModel): DomContents {
     const saveCopy = () => handleSaveCopy({ pageModel, doc, modalTitle: t("Save Document") });
     if (isEncryptedDoc(doc)) {
       return dom.domComputed(pageModel.gristDoc, (gristDoc) => {
+        // (The encryption session suggests owners to accept waiting members here.)
+        gristDoc?.docComm.encryption?.setReviewMembers(() => { manageUsers(doc, pageModel).catch(reportError); });
         if (gristDoc?.docComm.encryption?.isSuggesting) {
           // Changes are suggestions: they're sent (or discarded) from here.
           return shareButton(t("Send suggestion"), () => [
@@ -333,12 +335,13 @@ function menuEncryptedCopy(doc: Document, pageModel: DocPageModel) {
   const gristDoc = pageModel.gristDoc.get();
   const encryption = gristDoc?.docComm.encryption;
   if (!gristDoc || !encryption || !pageModel.appModel.currentValidUser) { return null; }
+  // (Sections end with a divider, as menuManageUsers() does.)
   return [
-    menuDivider(),
     menuItem(() => copyEncryptedDocument(gristDoc, doc), menuIcon("Copy"), t("Duplicate document"),
       dom.cls("disabled", !encryption.canReadAll),
       encryption.canReadAll ? null : hoverTooltip(t("Only members who can read all of the document can copy it")),
       testId("tb-share-option"), testId("encrypted-copy")),
+    menuDivider(),
   ];
 }
 
@@ -353,8 +356,8 @@ function menuLocalExports(pageModel: DocPageModel) {
     }
     downloadSection(gristDoc, format).catch(reportError);
   };
+  // (The last section: what comes before ends with a divider.)
   return [
-    menuDivider(),
     menuItemSubmenu(
       () => [
         menuItem(exportAs("csv"), t("Comma Separated Values (.csv)"), testId("tb-share-option")),
@@ -460,6 +463,7 @@ async function manageUsers(doc: DocInfo, docPageModel: DocPageModel) {
     docPageModel,
     appModel: docPageModel.appModel,
     linkToCopy: makeShareDocUrl(doc),
+    pendingEncryption: docPageModel.gristDoc.get()?.docComm.encryption,
     // On save, re-fetch the document info, to toggle the "Public Access" icon if it changed.
     // Skip if personal, since personal cannot affect "Public Access", and the only
     // change possible is to remove the user (which would make refreshCurrentDoc fail)

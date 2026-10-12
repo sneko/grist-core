@@ -73,6 +73,17 @@ export interface IUserManagerOptions {
   };
   showAnimation?: boolean; // If true, animates opening of the modal. Defaults to false.
   isReadonly?: boolean;    // If true, show a view-only sharing UI. Used for Admin Controls.
+  pendingEncryption?: PendingEncryption;
+}
+
+/**
+ * For end-to-end encrypted documents: members who can't read it yet, because they were added
+ * before enabling encryption on their account.
+ */
+export interface PendingEncryption {
+  // By email, with whether they enabled encryption since, and can be accepted (given the key).
+  getPendingEncryption(): Promise<Map<string, { canAccept: boolean }>>;
+  acceptMember(email: string): Promise<void>;
 }
 
 // Returns an instance of UserManagerModel given IUserManagerOptions. Makes the async call for the
@@ -191,7 +202,8 @@ function buildUserManagerModal(
           cssBody(
             new UserManager(
               model,
-              pick(options, "linkToCopy", "docPageModel", "appModel", "prompt", "resource", "isReadonly"),
+              pick(options, "linkToCopy", "docPageModel", "appModel", "prompt", "resource", "isReadonly",
+                "pendingEncryption"),
             ).buildDom(),
           ),
         ),
@@ -244,6 +256,7 @@ function buildUserManagerModal(
  */
 export class UserManager extends Disposable {
   private _dom: HTMLDivElement;
+  private _pendingEncryption = Observable.create(this, new Map<string, { canAccept: boolean }>());
 
   constructor(
     private _model: UserManagerModel,
@@ -254,8 +267,10 @@ export class UserManager extends Disposable {
       prompt?: { email: string },
       resource?: Resource,
       isReadonly?: boolean,
+      pendingEncryption?: PendingEncryption,
     }) {
     super();
+    this._loadPendingEncryption();
   }
 
   public buildDom() {
@@ -397,6 +412,8 @@ export class UserManager extends Disposable {
               this._buildSelfAnnotationDom(member) :
               this._buildAnnotationDom(member)
             ),
+            dom.maybe(use => use(this._pendingEncryption).get(member.email), pending =>
+              this._buildPendingEncryption(member, pending)),
           ),
           member.isRemoved ? null : this._memberRoleSelector(member.effectiveAccess,
             member.inheritedAccess, this._model.isActiveUser(member)),
@@ -419,6 +436,41 @@ export class UserManager extends Disposable {
           testId("um-member"),
         ),
       ),
+    );
+  }
+
+  private _loadPendingEncryption() {
+    this._options.pendingEncryption?.getPendingEncryption()
+      .then((pending) => { if (!this.isDisposed()) { this._pendingEncryption.set(pending); } })
+      .catch(reportError);
+  }
+
+  // For encrypted documents, a member who can't read it yet: either waiting for them to enable
+  // encryption, or (once they have) a button to accept them, as in Docs.
+  private _buildPendingEncryption(member: IEditableMember, pending: { canAccept: boolean }) {
+    if (!pending.canAccept) {
+      return cssPendingEncryption(icon("Clock"), t("Waiting for encryption"),
+        hoverTooltip(t("Added before they enabled encryption. Once they have, an owner accepts them here.")),
+        testId("um-member-pending-encryption"));
+    }
+    const busy = Observable.create(null, false);
+    return cssPendingEncryption(
+      dom.autoDispose(busy),
+      t("Enabled encryption since being added"),
+      basicButton(dom.text(use => use(busy) ? t("Accepting…") : t("Accept")),
+        dom.boolAttr("disabled", busy),
+        dom.on("click", async () => {
+          busy.set(true);
+          try {
+            await this._options.pendingEncryption!.acceptMember(member.email);
+            this._loadPendingEncryption();
+          } catch (e) {
+            reportError(e as Error);
+          } finally {
+            if (!busy.isDisposed()) { busy.set(false); }
+          }
+        }),
+        testId("um-member-accept-encryption")),
     );
   }
 
@@ -902,6 +954,17 @@ const cssTitle = styled(cssModalTitle, `
       margin: 16px;
     }
   }
+`);
+
+const cssPendingEncryption = styled("div", `
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: ${vars.smallFontSize};
+  color: ${theme.lightText};
+  --icon-color: ${theme.lightText};
+  white-space: nowrap;
 `);
 
 const cssMemberPublicAccess = styled(cssMemberSecondary, `

@@ -45,12 +45,9 @@ export function isLockedHere(docId: string): boolean {
 export function describeLock(lock: DocLockInfo): string {
   const name = lock.userName || t("A member");
   switch (lock.reason) {
-    case "encrypting": return t("{{name}} is encrypting this document end to end. " +
-      "It will open again as soon as it's done.", { name });
-    case "decrypting": return t("{{name}} is making this document a regular one (not end-to-end encrypted " +
-      "anymore). It will open again as soon as it's done.", { name });
-    case "restoring": return t("{{name}} is restoring an earlier version of this document. " +
-      "It will open again as soon as it's done.", { name });
+    case "encrypting": return t(`{{name}} is encrypting this document end to end. It will open again as soon as it's done.`, { name });
+    case "decrypting": return t(`{{name}} is removing encryption from this document. It will open again as soon as it's done.`, { name });
+    case "restoring": return t(`{{name}} is restoring an earlier version of this document. It will open again as soon as it's done.`, { name });
   }
 }
 

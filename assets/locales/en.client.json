@@ -108,7 +108,15 @@
         "You have **{{left}} of {{limit}}** monthly **API** calls left": "You have **{{left}} of {{limit}}** monthly **API** calls left",
         "You have **{{left}} of {{limit}}** one time **AI Assistant** credits left": "You have **{{left}} of {{limit}}** one time **AI Assistant** credits left",
         "You have **{{limit}}** monthly **API** calls": "You have **{{limit}}** monthly **API** calls",
-        "You have **{{limit}}** one time **AI Assistant** credits": "You have **{{limit}}** one time **AI Assistant** credits"
+        "You have **{{limit}}** one time **AI Assistant** credits": "You have **{{limit}}** one time **AI Assistant** credits",
+        "Enable encryption": "Enable encryption",
+        "Enabled": "Enabled",
+        "Encryption": "Encryption",
+        "Manage": "Manage",
+        "Needed to create end-to-end encrypted documents, and to read those shared with you.": "Needed to create end-to-end encrypted documents, and to read those shared with you.",
+        "Not enabled": "Not enabled",
+        "Status": "Status",
+        "The encryption service can't be reached": "The encryption service can't be reached"
     },
     "AccountWidget": {
         "Access Details": "Access Details",
@@ -445,7 +453,8 @@
         "End-to-end encrypted documents are not enabled on this server": "End-to-end encrypted documents are not enabled on this server",
         "Import": "Import",
         "Import from Google Drive": "Import from Google Drive",
-        "Import from file": "Import from file"
+        "Import from file": "Import from file",
+        "Paste the link to a Google Drive file (e.g. a Google Sheet). It's downloaded by your browser, and stays encrypted.": "Paste the link to a Google Drive file (e.g. a Google Sheet). It's downloaded by your browser, and stays encrypted."
     },
     "DocTour": {
         "Cannot construct a document tour from the data in this document. Ensure there is a table named GristDocTour with columns Title, Body, Placement, and Location.": "Cannot construct a document tour from the data in this document. Ensure there is a table named GristDocTour with columns Title, Body, Placement, and Location.",
@@ -548,7 +557,8 @@
         "Suggestions": "Suggestions",
         "experiment": "experiment",
         "For number formats": "For number formats",
-        "Encryption": "Encryption"
+        "Encryption": "Encryption",
+        "For the API: to rename, share or delete it, not to read its content": "For the API: to rename, share or delete it, not to read its content"
     },
     "DocumentUsage": {
         "Size of attachments": "Size of attachments",
@@ -1187,7 +1197,9 @@
         "editing": "editing",
         "suggesting": "suggesting",
         "INSECURE (mock)": "INSECURE (mock)",
-        "encrypted": "encrypted"
+        "encrypted": "encrypted",
+        "End-to-end encrypted: only members holding its key can read this document, the server can't.": "End-to-end encrypted: only members holding its key can read this document, the server can't.",
+        "This server uses a stand-in for the encryption service, with a known key: documents aren't actually protected. For tests and development only.": "This server uses a stand-in for the encryption service, with a known key: documents aren't actually protected. For tests and development only."
     },
     "duplicatePage": {
         "Duplicate page {{pageName}}": "Duplicate page {{pageName}}",
@@ -1713,7 +1725,12 @@
         "Your {{resourceType}} will be accessible to anyone with the link, whether shared directly or found through a search engine. \n Ensure that your {{resourceType}} does not contain sensitive data before sharing.": "Your {{resourceType}} will be accessible to anyone with the link, whether shared directly or found through a search engine. \n Ensure that your {{resourceType}} does not contain sensitive data before sharing.",
         "Configure notifications": "Configure notifications",
         "Invitation emails are not enabled on this installation.": "Invitation emails are not enabled on this installation.",
-        "Invitation emails are not sent on Grist Community edition.": "Invitation emails are not sent on Grist Community edition."
+        "Invitation emails are not sent on Grist Community edition.": "Invitation emails are not sent on Grist Community edition.",
+        "Accept": "Accept",
+        "Accepting…": "Accepting…",
+        "Enabled encryption since being added": "Enabled encryption since being added",
+        "Waiting for encryption": "Waiting for encryption",
+        "Added before they enabled encryption. Once they have, an owner accepts them here.": "Added before they enabled encryption. Once they have, an owner accepts them here."
     },
     "SearchModel": {
         "Search all pages": "Search all pages",
@@ -2242,7 +2259,8 @@
         "Learn more about custom widgets": "Learn more about custom widgets",
         "No matching widgets": "No matching widgets",
         "Search": "Search",
-        "Widget URL": "Widget URL"
+        "Widget URL": "Widget URL",
+        "This widget can't be used in end-to-end encrypted documents: it would see their content.": "This widget can't be used in end-to-end encrypted documents: it would see their content."
     },
     "markdown": {
         "# New Markdown Function\n *\n *      We can _write_ [the usual Markdown](https:": {
@@ -3654,7 +3672,17 @@
         "Your account is not known to the encryption service": "Your account is not known to the encryption service",
         "{{count}} member(s) can't read this encrypted document yet._one": "{{count}} member(s) can't read this encrypted document yet.",
         "{{count}} member(s) can't read this encrypted document yet._other": "{{count}} member(s) can't read this encrypted document yet.",
-        "Only members who can read the columns this form fills can publish it": "Only members who can read the columns this form fills can publish it"
+        "Only members who can read the columns this form fills can publish it": "Only members who can read the columns this form fills can publish it",
+        "Can't read it yet: gets access next time an owner opens it": "Can't read it yet: gets access next time an owner opens it",
+        "Can't read it yet: must enable encryption on their account": "Can't read it yet: must enable encryption on their account",
+        "Check again": "Check again",
+        "To encrypt a document, first enable encryption on your account.": "To encrypt a document, first enable encryption on your account.",
+        "They haven't enabled encryption on their account yet.": "They haven't enabled encryption on their account yet.",
+        "Review": "Review",
+        "{{count}} member(s) enabled encryption and are waiting for you to accept them._one": "{{count}} member enabled encryption and is waiting for you to accept them.",
+        "{{count}} member(s) enabled encryption and are waiting for you to accept them._other": "{{count}} members enabled encryption and are waiting for you to accept them.",
+        "Keys couldn't be replaced after a member lost access: it will be tried again on your next change.": "Keys couldn't be replaced after a member lost access: it will be tried again on your next change.",
+        "This document is encrypted. You have access to it, but not yet to its key: it will open as soon as an owner opens it and gives you access.": "This document is encrypted. You have access to it, but not yet to its key: it will open as soon as an owner opens it and gives you access."
     },
     "EncryptionUI": {
         "A member": "A member",
@@ -3722,7 +3750,38 @@
         "{{count}} access rule(s) limiting edits were dropped._one": "{{count}} access rule(s) limiting edits were dropped.",
         "{{count}} access rule(s) limiting edits were dropped._other": "{{count}} access rule(s) limiting edits were dropped.",
         "{{count}} column(s) hidden by access rules are now private columns._one": "{{count}} column(s) hidden by access rules are now private columns.",
-        "{{count}} column(s) hidden by access rules are now private columns._other": "{{count}} column(s) hidden by access rules are now private columns."
+        "{{count}} column(s) hidden by access rules are now private columns._other": "{{count}} column(s) hidden by access rules are now private columns.",
+        "End-to-end encryption": "End-to-end encryption",
+        "Make its content readable only in members' browsers: the server can't read it anymore": "Make its content readable only in members' browsers: the server can't read it anymore",
+        "On": "On",
+        "Only its members' browsers will be able to read it, not the server.": "Only its members' browsers will be able to read it, not the server.",
+        "Private columns become access rules, so members who couldn't read them still can't.": "Private columns become access rules, so members who couldn't read them still can't.",
+        "The server will be able to read it again.": "The server will be able to read it again.",
+        "Its content is encrypted in members' browsers: the server can't read it": "Its content is encrypted in members' browsers: the server can't read it",
+        "Remove encryption": "Remove encryption",
+        "Remove encryption from this document?": "Remove encryption from this document?",
+        "Removing encryption": "Removing encryption",
+        "Only the members you select (and you) will be able to read this column, and formulas that use it. Others will see 🔒 in its place.": "Only the members you select (and you) will be able to read this column, and formulas that use it. Others will see 🔒 in its place.",
+        "The copy is encrypted end to end too, with keys of its own. Private columns stay private. Its members (those of its workspace) can read what they could read in this document.": "The copy is encrypted end to end too, with keys of its own. Private columns stay private. Its members (those of its workspace) can read what they could read in this document.",
+        "The document will be as it was then: changes since will be undone (they're still in the history, as an earlier version). Members who have it open will reload it.": "The document will be as it was then: changes since will be undone (they're still in the history, as an earlier version). Members who have it open will reload it.",
+        "Webhooks, the API and server-side exports stop working. Access rules hiding columns become private columns; rules hiding rows aren't supported (remove them first).": "Webhooks, the API and server-side exports stop working. Access rules hiding columns become private columns; rules hiding rows aren't supported (remove them first).",
+        "Your changes ({{count}}) are sent to the members who can edit this document, who may apply them. They're undone here meanwhile._one": "Your changes ({{count}}) are sent to the members who can edit this document, who may apply them. They're undone here meanwhile.",
+        "Your changes ({{count}}) are sent to the members who can edit this document, who may apply them. They're undone here meanwhile._other": "Your changes ({{count}}) are sent to the members who can edit this document, who may apply them. They're undone here meanwhile.",
+        "{{members}} can't read it until they enable encryption and an owner gives them access.": "{{members}} can't read it until they enable encryption and an owner gives them access.",
+        "{{members}} can't read the copy until they enable encryption and an owner gives them access.": "{{members}} can't read the copy until they enable encryption and an owner gives them access.",
+        "{{members}} haven't enabled encryption on their account yet: give them access again once they have.": "{{members}} haven't enabled encryption on their account yet: give them access again once they have.",
+        "Only the members you select (and you) will be able to read this column, and formulas that use it. Others will see a lock in its place.": "Only the members you select (and you) will be able to read this column, and formulas that use it. Others will see a lock in its place.",
+        "Private column: only these members can read it.": "Private column: only these members can read it.",
+        "{{name}} (you)": "{{name}} (you)",
+        "All members of the document can read this table, except its private columns.": "All members of the document can read this table, except its private columns.",
+        "It's also in a private table: only members who can read both can read it.": "It's also in a private table: only members who can read both can read it.",
+        "It's in a private table: who can read it is set in the table's settings (Data tab).": "It's in a private table: who can read it is set in the table's settings (Data tab).",
+        "Its name, its columns and its number of rows stay visible to all members.": "Its name, its columns and its number of rows stay visible to all members.",
+        "Make this table private": "Make this table private",
+        "Only the members you select (and you) will be able to read this table's data, and formulas that use it. Others will see a lock in its place. Its name, columns and number of rows stay visible.": "Only the members you select (and you) will be able to read this table's data, and formulas that use it. Others will see a lock in its place. Its name, columns and number of rows stay visible.",
+        "Private table: only these members can read it.": "Private table: only these members can read it.",
+        "Private table: you don't have access to its data.": "Private table: you don't have access to its data.",
+        "Who can read this table": "Who can read this table"
     },
     "localAssistant": {
         "API key": "API key",
@@ -3741,13 +3800,23 @@
         "The AI service returned an error ({{status}}): {{message}}": "The AI service returned an error ({{status}}): {{message}}",
         "The AI service returned an invalid answer": "The AI service returned an invalid answer",
         "You'll be asked again in your next session.": "You'll be asked again in your next session.",
-        "what you ask the assistant.": "what you ask the assistant."
+        "what you ask the assistant.": "what you ask the assistant.",
+        "The AI assistant uses your own API key for this service. It's kept in this browser only (Grist's server never sees it).": "The AI assistant uses your own API key for this service. It's kept in this browser only (Grist's server never sees it).",
+        "This document is end-to-end encrypted. To help you with formulas, the assistant sends, from your browser:": "This document is end-to-end encrypted. To help you with formulas, the assistant sends, from your browser:",
+        "the structure of the document: names and types of its tables and columns (including the choices of choice columns), and their formulas;": "the structure of the document: names and types of its tables and columns (including the choices of choice columns), and their formulas;"
     },
     "lockOverlay": {
         "A member": "A member",
-        "Please wait": "Please wait"
+        "Please wait": "Please wait",
+        "{{name}} is encrypting this document end to end. It will open again as soon as it's done.": "{{name}} is encrypting this document end to end. It will open again as soon as it's done.",
+        "{{name}} is removing encryption from this document. It will open again as soon as it's done.": "{{name}} is removing encryption from this document. It will open again as soon as it's done.",
+        "{{name}} is restoring an earlier version of this document. It will open again as soon as it's done.": "{{name}} is restoring an earlier version of this document. It will open again as soon as it's done."
     },
     "sortUtil": {
         "This order is based on private columns: saving it would reveal it to all members.": "This order is based on private columns: saving it would reveal it to all members."
+    },
+    "AppUI": {
+        "It's decrypted in your browser: the server can't read it.": "It's decrypted in your browser: the server can't read it.",
+        "Opening the encrypted document": "Opening the encrypted document"
     }
 }

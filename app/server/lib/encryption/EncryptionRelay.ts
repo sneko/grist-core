@@ -27,7 +27,7 @@ import {
   Base64, DOC_SCOPE, DocKeyRecord, DocLockInfo, EncryptedActionRecord, EncryptedDocOpenResult,
   EncryptedInboxEntry, EncryptedPushResult, EncryptedSnapshotInfo, EncryptedSnapshotRecord, EncryptedSuggestion,
   EncryptionKeysResult,
-  EncryptionMember, isColumnScope, isEncryptedDoc, NewKeyRequest,
+  EncryptionMember, isColumnScope, isEncryptedDoc, isValidTarget, NewKeyRequest, targetTableRef,
 } from "app/common/encryption/EncryptionTypes";
 import { Features } from "app/common/Features";
 import { ANONYMOUS_USER_EMAIL, EVERYONE_EMAIL, getRealAccess } from "app/common/UserAPI";
@@ -179,6 +179,7 @@ export class EncryptionRelay {
         this.lockDoc(client, docId, reason),
       unlockEncryptedDoc: (client: Client, docId: string) => this.unlockDoc(client, docId),
       getDocLock: (client: Client, docId: string) => this.getLock(client, docId),
+      getEncryptionIdentity: (client: Client) => this.getIdentity(client),
       getGoogleDriveToken: (client: Client, docId: string, code: string) =>
         this.getGoogleDriveToken(client, docId, code),
       renewDocLock: (client: Client, docId: string) => this.renewLock(client, docId),
@@ -443,15 +444,16 @@ export class EncryptionRelay {
     const colRef = request.colRef;
     const bindsColumn = !current && isColumnScope(scope);
     if (bindsColumn) {
-      if (!Number.isInteger(colRef) || colRef! <= 0) {
-        throw new ApiError("A new column scope must say which column it makes private", 400);
+      if (!isValidTarget(colRef)) {
+        throw new ApiError("A new column scope must say which column or table it makes private", 400);
       }
       const bindings = await this._keys.getBindings(docId);
       if (bindings.some(b => b.scope === scope)) {
         throw new ApiError("This scope was already used", 409);
       }
       if (bindings.some(b => b.colRef === colRef && b.releasedAt === null)) {
-        throw new ApiError("This column is already private", 409);
+        const what = targetTableRef(colRef) ? "table" : "column";
+        throw new ApiError(`This ${what} is already private`, 409);
       }
     }
     await this._checkMembers(client, docId, wraps.map(w => w.userId));
@@ -517,7 +519,7 @@ export class EncryptionRelay {
       const isDoc = key.scope === DOC_SCOPE;
       if (typeof key.scope !== "string" || (!isDoc && !/^column:[a-z0-9]{1,64}$/.test(key.scope)) ||
         typeof key.keyId !== "string" || !key.keyId.startsWith(`${key.scope}~`) || key.keyId.length > 200 ||
-        (!isDoc && (!Number.isInteger(key.colRef) || key.colRef! <= 0 || colRefs.has(key.colRef!)))) {
+        (!isDoc && (!isValidTarget(key.colRef) || colRefs.has(key.colRef)))) {
         throw new ApiError("Invalid key", 400);
       }
       if (!isDoc) { colRefs.add(key.colRef!); }
@@ -870,6 +872,16 @@ export class EncryptionRelay {
     this._requireUserId(client);
     if (reason !== "restoring" && reason !== "decrypting") { throw new ApiError("Invalid reason", 400); }
     this.lock(client, docId, reason);
+  }
+
+  /**
+   * How the signed-in user is known to the encryption service (their OIDC subject), e.g. to check
+   * they set up their keys before encrypting a document.
+   */
+  public async getIdentity(client: Client): Promise<{ userId: number, vaultUserId: string | null }> {
+    const userId = this._requireUserId(client);
+    const user = await this._dbManager.getUser(userId);
+    return { userId, vaultUserId: user?.options?.authSubject ?? null };
   }
 
   /** Whether a document (encrypted or not) is locked, e.g. being converted to or from encryption. */

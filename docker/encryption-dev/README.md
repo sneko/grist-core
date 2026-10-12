@@ -142,6 +142,10 @@ GRIST_ENCRYPTION_INTERFACE_URL=http://encryption.localhost:7200 \
 yarn start
 ```
 
+If Grist runs in a VM or container (e.g. Lima) and the browser on the host gets "connection
+refused", add `GRIST_HOST=0.0.0.0`: by default Grist may only listen on `localhost` inside it
+(even only on IPv6 `::1`), which port forwarding doesn't reach.
+
 Do not set `GRIST_TEST_LOGIN` nor `GRIST_ENCRYPTION_MOCK_VAULT` here: the test login replaces
 the OIDC login, and the mock vault replaces the encryption service. Add `GRIST_IN_SERVICE=true`
 if pages redirect to `/boot` (see above).

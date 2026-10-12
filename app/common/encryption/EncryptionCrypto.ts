@@ -27,7 +27,10 @@ export interface IKeyVault {
   /** Whether the current user has encryption keys available on this device. */
   hasKeys(): Promise<boolean>;
   /** Asks the user to set up (or restore) their encryption keys, e.g. in the vault's interface. */
-  openOnboarding?(): void;
+  // Opens the service's setup of the user's keys: resolves with whether it was completed.
+  openOnboarding?(): Promise<boolean>;
+  // Opens the service's settings of the user's encryption (keys, devices, backup).
+  openSettings?(): void;
   /** Which of these users have registered encryption keys (and so can receive a document key). */
   getRegisteredUsers(vaultUserIds: string[]): Promise<Set<string>>;
   /** Mints a new document key, wrapped for each recipient. Returns wraps keyed by vaultUserId. */

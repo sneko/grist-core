@@ -153,6 +153,9 @@ export interface ImportSource {
 export class DocPageModelImpl extends Disposable implements DocPageModel {
   // Observable set to the instance of GristDoc once it's created.
   public readonly gristDoc = Observable.create<GristDocImpl | null>(this, null);
+  // Whether an end-to-end encrypted document is being opened (decrypted, and its data engine
+  // started, in the browser): the page shows a loader meanwhile.
+  public readonly openingEncrypted = Observable.create<boolean>(this, false);
 
   public readonly pageType = "doc";
 
@@ -521,11 +524,12 @@ contact the document owners to attempt a document recovery. [{{error}}]", { erro
     if (isEncryptedDoc(doc) && !encryptionConfig) {
       throw new Error(t("End-to-end encrypted documents are not enabled on this server"));
     }
+    if (isEncryptedDoc(doc)) { this.openingEncrypted.set(true); }
     const encrypted = isEncryptedDoc(doc) ? await loadEncryption().then(m =>
       m.EncryptedDocSession.open(comm, doc.id, encryptionConfig!, {
         isCancelled: () => flow.isCancelled,
         canSuggest: Boolean(doc.options?.proposedChanges?.acceptProposals),
-      })) : null;
+      })).finally(() => { if (!this.isDisposed()) { this.openingEncrypted.set(false); } }) : null;
     // The flow owns the session until the DocComm takes it over.
     if (encrypted) { flow.autoDispose(encrypted.session); }
     const openDocResponse = encrypted ? encrypted.openResponse : await comm.openDoc(doc.id, {
@@ -657,8 +661,7 @@ function importFromGoogleDrive(gristDoc: GristDoc) {
     return [
       cssModalTitle(t("Import from Google Drive")),
       cssModalBody(
-        dom("p", t("Paste the link to a Google Drive file (e.g. a Google Sheet). It's downloaded by your " +
-          "browser, and stays encrypted.")),
+        dom("p", t(`Paste the link to a Google Drive file (e.g. a Google Sheet). It's downloaded by your browser, and stays encrypted.`)),
         textInput(url, { placeholder: "https://docs.google.com/spreadsheets/d/..." }, testId("dp-drive-url")),
       ),
       cssModalButtons(

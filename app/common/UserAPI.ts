@@ -118,6 +118,9 @@ export interface Organization extends OrganizationWithoutAccessInfo {
 // shows about their personal site, so that it does not need a second request for it.
 export interface AccountInfo extends FullUser {
   personalSite?: PersonalSiteUsage;
+  // How the user is known to the encryption service (when end-to-end encrypted documents are
+  // enabled): to show and change their encryption setup from their account page.
+  encryptionUserId?: string;
 }
 
 // Usage of a personal site, against the limits its plan sets. A part is missing when the

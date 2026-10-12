@@ -440,6 +440,19 @@ describe("encryption/EncryptionRelay", function() {
       keys = await call(bob, "getEncryptionKeys", docId);
       assert.deepEqual(keys.bindings, [{ scope, colRef: 7, boundAt: 6, releasedAt: 7 }]);
       await assert.isRejected(call(alice, "releaseEncryptionScope", docId, scope, 7), /not private/);
+
+      // A whole table can be made private too: its target is minus its row id (see tableTarget()).
+      const tableScope = "column:table3";
+      await assert.isRejected(call(alice, "createEncryptionKey", docId,
+        { scope: tableScope, keyId: `${tableScope}~1`, baseActionNum: 7, wraps, colRef: 0 }), /which column or table/);
+      assert.deepInclude(await call(alice, "createEncryptionKey", docId,
+        { scope: tableScope, keyId: `${tableScope}~1`, baseActionNum: 7, wraps, colRef: -3 }),
+      { accepted: true, actionNum: 8 });
+      keys = await call(bob, "getEncryptionKeys", docId);
+      assert.deepInclude(keys.bindings, { scope: tableScope, colRef: -3, boundAt: 8, releasedAt: null });
+      await assert.isRejected(call(alice, "createEncryptionKey", docId,
+        { scope: "column:table3b", keyId: "column:table3b~1", baseActionNum: 8, wraps, colRef: -3 }),
+      /table is already private/);
     });
 
     it("refuses access to non-members and to regular documents", async function() {
@@ -961,6 +974,28 @@ describe("encryption/EncryptionRelay", function() {
       const opened: EncryptedDocOpenResult = await call(alice, "openEncryptedDoc", rulesDocId);
       assert.deepEqual(opened.bindings, [{ scope: "column:b", colRef: colRefB, boundAt: 0, releasedAt: null }]);
       assert.sameMembers(opened.keys.map(k => k.keyId), ["doc~rules", "column:b~1"]);
+      await owner.deleteDoc(rulesDocId);
+    });
+
+    it("turns access rules hiding whole tables into private tables", async function() {
+      const rulesDocId = await owner.newDoc({ name: "with table rules" }, wsId);
+      const docApi = owner.getDocAPI(rulesDocId);
+      await docApi.applyUserActions([["AddTable", "Salaries", [{ id: "Amount", type: "Numeric", isFormula: false }]]]);
+      await docApi.addRows("Salaries", { Amount: [52100] });
+      // Kiwi can't see the Salaries table at all.
+      await docApi.applyUserActions([
+        ["AddRecord", "_grist_ACLResources", -1, { tableId: "Salaries", colIds: "*" }],
+        ["AddRecord", "_grist_ACLRules", null, { resource: -1, rulePos: 1,
+          aclFormula: "user.Email == 'kiwi@getgrist.com'", permissionsText: "-CRUD" }],
+      ]);
+      const tables = await docApi.getRecords("_grist_Tables");
+      const salariesRef = Number(tables.find(t => t.fields.tableId === "Salaries")!.id);
+      const alice = await connect("chimpy@getgrist.com");
+      const start = await call(alice, "beginDocEncryption", rulesDocId);
+      // One private table (its target is minus its row id), rather than private columns.
+      assert.deepEqual(start.columnAudiences.map((a: { colRef: number }) => a.colRef), [-salariesRef]);
+      assert.sameMembers(start.columnAudiences[0].userIds, [ids["chimpy@getgrist.com"], ids["charon@getgrist.com"]]);
+      await call(alice, "abortDocConversion", rulesDocId);
       await owner.deleteDoc(rulesDocId);
     });
 

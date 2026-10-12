@@ -8,16 +8,21 @@
  * For tests and development, GRIST_ENCRYPTION_MOCK_VAULT replaces it with MockKeyVault, which uses
  * a hardcoded key.
  */
+import { gristThemeObs } from "app/client/ui2018/theme";
 import { IKeyVault, KeyRecipient, MockKeyVault, WrappedKey } from "app/common/encryption/EncryptionCrypto";
 import { EncryptionClientConfig } from "app/common/gristUrls";
+import { Theme } from "app/common/ThemePrefs";
 
 /** The subset of the encryption service's VaultClient that Grist uses. */
 interface VaultClient {
   init(): Promise<void>;
   setAuthContext(context: { suiteUserId: string }): void;
+  setTheme(theme: string): void;
   hasKeys(): Promise<{ hasKeys: boolean }>;
   openOnboarding(): void;
+  openSettings(): void;
   on(event: string, listener: (data: any) => void): void;
+  off(event: string, listener: (data: any) => void): void;
   fetchPublicKeys(subs: string[]): Promise<Record<string, { verified: boolean, version: number }>>;
   encryptWithoutKey(data: ArrayBuffer, recipients: Record<string, { email: string, name?: string }>):
   Promise<{ encryptedContent: ArrayBuffer, encryptedKeys: Record<string, ArrayBuffer> }>;
@@ -71,9 +76,13 @@ class ServiceKeyVault implements IKeyVault {
       vaultUrl: config.vaultUrl,
       interfaceUrl: config.interfaceUrl,
       lang: document.documentElement.lang || navigator.language,
+      theme: interfaceTheme(gristThemeObs().get()),
     });
+    // (Follows Grist's appearance when it changes, e.g. with the system's.)
+    gristThemeObs().addListener(theme => client.setTheme(interfaceTheme(theme)));
     await client.init();
     client.setAuthContext({ suiteUserId: vaultUserId });
+    keepInterfaceTransparent(config.interfaceUrl);
     return new ServiceKeyVault(client);
   }
 
@@ -83,8 +92,27 @@ class ServiceKeyVault implements IKeyVault {
     return (await this._client.hasKeys()).hasKeys;
   }
 
-  public openOnboarding() {
-    this._client.openOnboarding();
+  /**
+   * Opens the encryption service's setup (key creation and backup). Resolves with true once done,
+   * or false if the user closed it before.
+   */
+  public openOnboarding(): Promise<boolean> {
+    return new Promise((resolve) => {
+      const finish = (done: boolean) => {
+        this._client.off("onboarding:complete", onComplete);
+        this._client.off("interface:closed", onClosed);
+        resolve(done);
+      };
+      const onComplete = () => finish(true);
+      const onClosed = () => finish(false);
+      this._client.on("onboarding:complete", onComplete);
+      this._client.on("interface:closed", onClosed);
+      this._client.openOnboarding();
+    });
+  }
+
+  public openSettings() {
+    this._client.openSettings();
   }
 
   public async getRegisteredUsers(vaultUserIds: string[]) {
@@ -170,4 +198,25 @@ function loadScript(src: string): Promise<void> {
     script.onerror = () => reject(new Error("Failed to load the encryption service client"));
     document.head.appendChild(script);
   });
+}
+
+// The encryption service's interface uses Cunningham themes: match Grist's light or dark appearance.
+function interfaceTheme(theme: Theme): string {
+  return theme.appearance === "dark" ? "dark" : "default";
+}
+
+/**
+ * The encryption service's interface is shown in an iframe over Grist's page, meant to be
+ * transparent (it draws its own backdrop). Browsers paint an opaque background behind iframes
+ * whose content has another color scheme than the iframe element: Grist sets one on its page
+ * (e.g. dark), the interface doesn't (so light, even with its dark theme). So its iframe gets the
+ * interface's own.
+ */
+function keepInterfaceTransparent(interfaceUrl: string) {
+  const id = "grist-encryption-interface-style";
+  if (document.getElementById(id)) { return; }
+  const style = document.createElement("style");
+  style.id = id;
+  style.textContent = `iframe[src^=${JSON.stringify(interfaceUrl.replace(/\/$/, ""))}] { color-scheme: light; }`;
+  document.head.appendChild(style);
 }

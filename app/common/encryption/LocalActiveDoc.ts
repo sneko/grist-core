@@ -140,6 +140,11 @@ export interface LocalActiveDocOptions {
   // Called for changes from others that don't respect private columns, or can't be applied (see
   // the comment at the top): skipped, or with some private values locked.
   onInvalidChange?: (change: InvalidChange) => void;
+  // Called when keys flagged for replacement couldn't be replaced before an edit: the edit still
+  // goes through with the current keys, and replacing them is tried again on the next one.
+  onRotationFailed?: (error: Error) => void;
+  // Called as each step of opening the document is done (to measure them).
+  onOpenStep?: (step: string) => void;
   log?: (...args: any[]) => void;
 }
 
@@ -252,6 +257,7 @@ export class LocalActiveDoc {
   // When formulas depending on the current time were last updated (by anyone), as known here.
   private _lastTimeUpdateMs = 0;
   private _revealScheduled = false;
+  private _reservedTableRefs: number[] = [];
   private _reservedColRefs: number[] = [];
   // Changes made while suggesting (see submitSuggestion()), applied locally only, and changes from
   // others held back meanwhile (they're applied once the suggestion is sent or discarded).
@@ -544,8 +550,11 @@ export class LocalActiveDoc {
     this._assertCanEdit();
     return this._exclusive(async () => {
       const record = await this._relay.getSnapshot(actionNum);
+      const step = (name: string) => this._options.onOpenStep?.(name);
       const payload = record.payload ? base64ToBytes(record.payload) : await this._relay.fetchSnapshot(record);
+      step(`fetch snapshot (${Math.round(payload.length / 1024)} KB)`);
       const snapshot = await decryptSnapshot(this._keyring, record.keyId, payload);
+      step("decrypt snapshot");
       if (snapshot.actionNum !== record.actionNum) { throw new Error("Encrypted snapshot doesn't match the document"); }
       const privacyThen = ColumnPrivacy.fromMetaTables(snapshot.tables._grist_Tables,
         snapshot.tables._grist_Tables_column, this._keyring.bindingsAt(snapshot.actionNum));
@@ -656,8 +665,11 @@ export class LocalActiveDoc {
   private async _load(openResult: EncryptedDocOpenResult) {
     if (openResult.snapshot) {
       const record = openResult.snapshot;
+      const step = (name: string) => this._options.onOpenStep?.(name);
       const payload = record.payload ? base64ToBytes(record.payload) : await this._relay.fetchSnapshot(record);
+      step(`fetch snapshot (${Math.round(payload.length / 1024)} KB)`);
       const snapshot = await decryptSnapshot(this._keyring, record.keyId, payload);
+      step("decrypt snapshot");
       if (snapshot.actionNum !== record.actionNum) { throw new Error("Encrypted snapshot doesn't match the document"); }
       this._head = this._snapshotNum = snapshot.actionNum;
       this._snapshotKeyId = record.keyId;
@@ -669,6 +681,7 @@ export class LocalActiveDoc {
         await this._keyring.initHistory();
       }
       await this._loadSnapshot(snapshot);
+      step("load snapshot into engine");
     } else if (openResult.actions.length > 0 || openResult.head > 0) {
       throw new Error("Encrypted document has changes but no snapshot to apply them to");
     } else if (this._options.newDocSettings) {
@@ -680,14 +693,18 @@ export class LocalActiveDoc {
       throw new Error("Encrypted document is not initialized yet");
     }
     await this._engine.call("initialize", null);
+    this._options.onOpenStep?.("initialize engine");
     // As the server does when it opens a document, evaluate all formulas (so the engine learns
     // what they depend on), but keeping the values everyone shares: re-evaluating NOW() or
     // RANDBETWEEN() in each browser would give each different values. This must come before
     // applying any change, which would evaluate them.
     await this._engine.call("calculate_exactly", this._options.engineUser);
+    this._options.onOpenStep?.("calculate formulas");
     this.docData = new DocData(tableId => this.fetchTable(tableId), await this._engine.call("fetch_meta_tables"));
     // Changes since the snapshot; there may be more on the server than were returned.
+    const headBefore = this._head;
     await this._catchUp(openResult.actions);
+    this._options.onOpenStep?.(`apply changes since snapshot (${this._head - headBefore})`);
 
     this._loading = false;
     if (this.canEdit) {
@@ -777,6 +794,12 @@ export class LocalActiveDoc {
       await this._engine.call("set_reserved_row_ids", "_grist_Tables_column", reserved);
       this._reservedColRefs = reserved;
     }
+    // Likewise for private tables.
+    const reservedTables = this._keyring.boundTableRefs();
+    if (!isEqual(reservedTables, this._reservedTableRefs)) {
+      await this._engine.call("set_reserved_row_ids", "_grist_Tables", reservedTables);
+      this._reservedTableRefs = reservedTables;
+    }
   }
 
   /**
@@ -834,7 +857,7 @@ export class LocalActiveDoc {
   /** One attempt of _applyAndPush(): returns CONFLICT if the server refused the change. */
   private async _tryApplyAndPush(actions: UserAction[], options: ApplyUAOptions,
     flags: PushFlags = {}): Promise<ApplyUAResult | typeof CONFLICT> {
-    if (!this._loading) { await this._rotateKeysIfNeeded(); }
+    if (!this._loading) { await this._tryRotatingKeys(); }
     const result: EngineResult = await this._engine.call("apply_user_actions", actions, this._options.engineUser);
     const stored = result.stored.map(env => env[1]);
     const undo = result.undo.map(env => env[1]);
@@ -1388,6 +1411,21 @@ export class LocalActiveDoc {
     const privacy = ColumnPrivacy.fromMetaTables(tables._grist_Tables, tables._grist_Tables_column,
       this._keyring.bindingsAt(actionNum));
     return this._buildSnapshot(actionNum, privacy, tables, this._sealedCells);
+  }
+
+  /**
+   * Like _rotateKeysIfNeeded(), before an edit: a failure (e.g. the encryption service being
+   * unavailable) doesn't block editing. Nothing was changed then (a key and the document under it
+   * are saved together, or not at all), and the keys stay flagged, so it's tried again next time.
+   * Meanwhile, those who lost access no longer get changes from the server.
+   */
+  private async _tryRotatingKeys() {
+    try {
+      await this._rotateKeysIfNeeded();
+    } catch (e) {
+      this._log("Could not replace keys, will try again on the next edit", e);
+      this._options.onRotationFailed?.(e as Error);
+    }
   }
 
   /**

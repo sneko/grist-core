@@ -49,6 +49,25 @@ export function isColumnScope(scope: string) {
   return scope.startsWith("column:");
 }
 
+/**
+ * What a scope makes private, as recorded in its binding (ScopeBinding.colRef, and colRef in key
+ * changes): a column, by its row id in _grist_Tables_column, or a whole table (all its columns,
+ * including those added later), by minus its row id in _grist_Tables.
+ */
+export function tableTarget(tableRef: number): number {
+  return -tableRef;
+}
+
+/** The table a binding target makes private (see tableTarget()), or null for a column. */
+export function targetTableRef(target: number): number | null {
+  return target < 0 ? -target : null;
+}
+
+/** Whether a number is a valid binding target (see tableTarget()). */
+export function isValidTarget(target: unknown): target is number {
+  return Number.isInteger(target) && target !== 0;
+}
+
 /** Describes the engine assets served by the server (see app/server/lib/encryption/engineAssets.ts). */
 export interface EngineManifest {
   version: string;
@@ -138,8 +157,9 @@ export interface DocKeyInfo {
 }
 
 /**
- * A private column: values of the column colRef (its row id in _grist_Tables_column) are
- * protected by the scope's keys, for the entries of the history after boundAt (the entry that
+ * A private column or table: values of the column colRef (its row id in _grist_Tables_column),
+ * or of all the columns of a private table (colRef being then minus the table's row id, see
+ * tableTarget()), are protected by the scope's keys, for the entries of the history after boundAt (the entry that
  * created the scope's first key) and before releasedAt (when the column was made public again).
  */
 export interface ScopeBinding {
@@ -181,7 +201,7 @@ export interface KeyChangeRecord {
   scope: string;
   keyId: string;          // The new key, or the current key of the scope made public.
   check?: Base64;         // For a new key (see KeyHistoryEntry).
-  colRef?: number;        // For the first key of a column scope: the column made private.
+  colRef?: number;        // For the first key of a column scope: the column or table made private (see tableTarget()).
   release?: boolean;      // For a column made public again.
 }
 
@@ -242,7 +262,7 @@ export interface NewKeyRequest {
   // For a new key of an existing scope: the latest change known to the caller (as for
   // pushEncryptedAction). The key change gets recorded right after it.
   baseActionNum: number;
-  // For the first key of a column scope: the column it makes private.
+  // For the first key of a column scope: the column it makes private, or the table (see tableTarget()).
   colRef?: number;
   // The encrypted KeyChangeRecord (see KeyHistory), recorded as the history entry's payload.
   record?: Base64;
