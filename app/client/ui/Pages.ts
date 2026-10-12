@@ -104,7 +104,7 @@ function buildDomFromTable(
     onCollapseByDefault: value => pageRec.setAndSaveCollapsed(value),
     hasSubPages: () => item.children().get().length > 0,
     href: urlState().setLinkUrl({ docPage: viewId }),
-    afterName: dom.create(buildPrivatePageMarker, activeDoc, viewRec),
+    afterName: () => dom.create(buildPrivatePageMarker, activeDoc, viewRec),
   };
 
   return buildPageDom(fromKo(pageName), options);

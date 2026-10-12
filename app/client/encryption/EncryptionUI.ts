@@ -208,8 +208,9 @@ function editAudience(encryption: IDocEncryption, target: PrivacyTarget) {
     const selected = new Map<number, Observable<boolean>>();
     const members = Observable.create<EncryptionMember[] | null>(owner, null);
     const load = async () => {
+      // (Owners always have access: they aren't chosen.)
       const all = (target.within ? await encryption.getScopeAudience(target.within) : await encryption.listMembers())
-        .filter(m => m.userId !== encryption.userId);
+        .filter(m => m.userId !== encryption.userId && m.access !== "owners");
       const audience = target.scope ? await encryption.getScopeAudience(target.scope) : [];
       for (const m of all) {
         selected.set(m.userId, Observable.create(owner, audience.some(a => a.userId === m.userId)));
@@ -223,12 +224,12 @@ function editAudience(encryption: IDocEncryption, target: PrivacyTarget) {
         (target.scope ? t("Who has access to this column") : t("Make this column private")),
       body: [
         cssHint(isTable ?
-          t(`Only the members you select (and you) will see this table's data and the results of formulas using it, and can change them if their role allows it. Others will see a lock instead, and can't change them. Its name, columns and number of rows stay visible.`) :
+          t(`Only owners and the members you select will see this table's data and the results of formulas using it, and can change them if their role allows it. Others will see a lock instead, and can't change them. Its name, columns and number of rows stay visible.`) :
           target.within ?
-            t(`Among the members with access to the table, only those you select (and you) will see this column's values and the results of formulas using them, and can change them if their role allows it. Others will see a lock instead, and can't change them.`) :
-            t(`Only the members you select (and you) will see this column's values and the results of formulas using them, and can change them if their role allows it. Others will see a lock instead, and can't change them.`)),
+            t(`Among the members with access to the table, only owners and those you select will see this column's values and the results of formulas using them, and can change them if their role allows it. Others will see a lock instead, and can't change them.`) :
+            t(`Only owners and the members you select will see this column's values and the results of formulas using them, and can change them if their role allows it. Others will see a lock instead, and can't change them.`)),
         dom.domComputed(members, list => list === null ? cssHint(t("Loading…")) : list.length === 0 ?
-          cssHint(t("There are no other members.")) :
+          cssHint(t("There are no other members than owners.")) :
           list.map(m => cssRow(labeledSquareCheckbox(selected.get(m.userId)!,
             m.name ? `${m.name} (${m.email})` : m.email, testId("audience-member"))))),
       ],
@@ -376,15 +377,14 @@ export function buildPrivatePageMarker(owner: MultiHolder, gristDoc: GristDoc, v
   const encryption = getEncryption(gristDoc);
   if (!encryption) { return null; }
   const version = keysVersion(owner, encryption);
-  const isPrivate = Computed.create(owner, (use) => {
+  // (A page may show several tables, in its widgets.)
+  const privateTables = Computed.create(owner, (use) => {
     use(version);
-    return use(use(view.viewSections).getObservable()).some((section) => {
-      const tableRef = use(section.tableRef);
-      return Boolean(tableRef && encryption.tableScope(tableRef));
-    });
+    const tableRefs = use(use(view.viewSections).getObservable()).map(section => use(section.tableRef));
+    return new Set(tableRefs.filter(tableRef => tableRef && encryption.tableScope(tableRef))).size;
   });
-  return dom.maybe(isPrivate, () => cssPageLockIcon("Lock",
-    hoverTooltip(t("This page shows private tables: only some members have access to them.")),
+  return dom.maybe(privateTables, count => cssPageLockIcon("Lock",
+    hoverTooltip(t("This page shows private tables: only some members have access to them.", { count })),
     testId("page-private-marker")));
 }
 

@@ -109,7 +109,15 @@
         "You have **{{left}} of {{limit}}** monthly **API** calls left": "Il vous reste **{{left}} sur {{limit}}** appels **API** mensuels",
         "You have **{{left}} of {{limit}}** one time **AI Assistant** credits left": "Il vous reste **{{left}} sur {{limit}}** crédits uniques d'**Assistant IA**",
         "You have **{{limit}}** monthly **API** calls": "Vous avez le droit à **{{limit}}** appels **API** par mois",
-        "You have **{{limit}}** one time **AI Assistant** credits": "Vous avez le droit à **{{limit}}** crédits uniques d'**Assistant IA**"
+        "You have **{{limit}}** one time **AI Assistant** credits": "Vous avez le droit à **{{limit}}** crédits uniques d'**Assistant IA**",
+        "Enable encryption": "Activer le chiffrement",
+        "Enabled": "Activé",
+        "Encryption": "Chiffrement",
+        "Manage": "Gérer",
+        "Needed to create end-to-end encrypted documents, and to read those shared with you.": "Nécessaire pour créer des documents chiffrés de bout en bout, et pour lire ceux partagés avec vous.",
+        "Not enabled": "Non activé",
+        "Status": "Statut",
+        "The encryption service can't be reached": "Le service de chiffrement est injoignable"
     },
     "AccountWidget": {
         "Sign in": "Se connecter",
@@ -391,7 +399,13 @@
         "Add widget to page": "Ajouter une vue à la page",
         "Add empty table": "Ajouter une table vide",
         "You do not have edit access to this document": "Vous n’avez pas accès en écriture à ce document",
-        "Please reload the document and if the error persist, contact the document owners to attempt a document recovery. [{{error}}]": "Veuillez recharger le document et si l'erreur persiste, contactez les propriétaires du document pour tenter une récupération du document. [{{error}}]"
+        "Please reload the document and if the error persist, contact the document owners to attempt a document recovery. [{{error}}]": "Veuillez recharger le document et si l'erreur persiste, contactez les propriétaires du document pour tenter une récupération du document. [{{error}}]",
+        "Cancel": "Annuler",
+        "End-to-end encrypted documents are not enabled on this server": "Les documents chiffrés de bout en bout ne sont pas activés sur ce serveur",
+        "Import": "Importer",
+        "Import from Google Drive": "Importer depuis Google Drive",
+        "Import from file": "Importer depuis un fichier",
+        "Paste the link to a Google Drive file (e.g. a Google Sheet). It's downloaded by your browser, and stays encrypted.": "Collez le lien d'un fichier Google Drive (par exemple une feuille Google Sheets). Il est téléchargé par votre navigateur, et reste chiffré."
     },
     "DocTour": {
         "No valid document tour": "Visite de document invalide",
@@ -493,7 +507,8 @@
         "Enable suggestions": "Activer les suggestions",
         "Suggestions": "Suggestions",
         "experiment": "expérimentation",
-        "For number formats": "Pour les formats de nombre"
+        "For number formats": "Pour les formats de nombre",
+        "For the API: to rename, share or delete it, not to read its content": "Pour l'API : pour le renommer, le partager ou le supprimer, pas pour lire son contenu"
     },
     "DocumentUsage": {
         "Usage statistics are only available to users with full access to the document data.": "Les statistiques d'utilisation ne sont accessibles qu'aux utilisateurs ayant un accès complet aux données du document.",
@@ -710,7 +725,8 @@
         "Terms of service": "CGU",
         "Grist Resources": "Ressources Grist",
         "context menu - {{- workspaceName }}": "menu contextuel - {{- workspaceName }}",
-        "Import from Airtable": "Importer depuis Airtable"
+        "Import from Airtable": "Importer depuis Airtable",
+        "Create encrypted document": "Créer un document chiffré"
     },
     "Importer": {
         "Update existing records": "Mettre à jour les enregistrements existants",
@@ -949,7 +965,11 @@
         "Exporting is only available from document pages. Please select a document page and try again.": "L'export n'est possible qu'à partir des pages du document. Veuillez sélectionner une page du document et réessayer.",
         "Suggest changes": "Suggérer des modifications",
         "current version": "version actuelle",
-        "original": "original"
+        "original": "original",
+        "Discard my changes": "Annuler mes modifications",
+        "My suggestions waiting": "Mes suggestions en attente",
+        "Only members who can read all of the document can copy it": "Seuls les membres qui peuvent lire tout le document peuvent le copier",
+        "Send suggestion": "Envoyer la suggestion"
     },
     "SiteSwitcher": {
         "Switch Sites": "Changer d’espace",
@@ -1069,7 +1089,8 @@
         "Collapse widget": "Réduire la vue",
         "Add to page": "Ajouter à la page",
         "Create a form": "Créer un formulaire",
-        "Duplicate widget": "Dupliquer la vue"
+        "Duplicate widget": "Dupliquer la vue",
+        "Download as TSV": "Télécharger en TSV"
     },
     "ViewSectionMenu": {
         "Update Sort&Filter settings": "Mettre à jour le tri et le filtre",
@@ -1113,7 +1134,11 @@
         "fiddle": "bac à sable",
         "You may make edits,\nbut they will not affect the original document.\nYou can propose them as suggestions.": "Vous pouvez apporter des modifications,\nmais elles n'affecteront pas le document original.\nVous pouvez les soumettre à titre de suggestions.",
         "editing": "édition",
-        "suggesting": "suggestion"
+        "suggesting": "suggestion",
+        "INSECURE (mock)": "NON SÉCURISÉ (simulé)",
+        "End-to-end encrypted: only members holding its key can read this document, the server can't.": "Chiffré de bout en bout : seuls les membres détenant sa clé peuvent lire ce document, pas le serveur.",
+        "This server uses a stand-in for the encryption service, with a known key: documents aren't actually protected. For tests and development only.": "Ce serveur utilise un substitut du service de chiffrement, avec une clé connue : les documents ne sont pas réellement protégés. Pour les tests et le développement uniquement.",
+        "Encrypted": "Chiffré"
     },
     "duplicatePage": {
         "Note that this does not copy data, but creates another view of the same data.": "Notez que cette opération ne duplique pas les données, mais crée une autre page avec les mêmes données.",
@@ -1292,7 +1317,9 @@
         "Field in {{count}} views_one": "Champ dans une vue",
         "Field in {{count}} views_other": "Champ dans {{count}} vues",
         "Common": "Commun",
-        "Separate": "Séparé"
+        "Separate": "Séparé",
+        "You don't have access to this private column": "Vous n'avez pas accès à cette colonne privée",
+        "This value is used by a calculation you don't have access to: it has to be changed by a member who can read the private columns it uses.": "Cette valeur est utilisée par un calcul auquel vous n'avez pas accès : elle doit être modifiée par un membre qui peut lire les colonnes privées qu'il utilise."
     },
     "WelcomeTour": {
         "Customizing columns": "Personnaliser les colonnes",
@@ -1682,7 +1709,12 @@
         "Your {{resourceType}} will be accessible to anyone with the link, whether shared directly or found through a search engine. \n Ensure that your {{resourceType}} does not contain sensitive data before sharing.": "Votre {{resourceType}} sera accessible par toute personne ayant le lien, que ce soit via un partage directe ou à travers un moteur de recherche.\n Assurez vous que votre {{resourceType}} ne contienne pas de données sensible avant de partager.",
         "Configure notifications": "Configurer les notifications",
         "Invitation emails are not enabled on this installation.": "Les mails d'invitation ne sont pas activés sur cette installation.",
-        "Invitation emails are not sent on Grist Community edition.": "Les mails d'invitation ne sont pas envoyés dans la version communautaire de Grist."
+        "Invitation emails are not sent on Grist Community edition.": "Les mails d'invitation ne sont pas envoyés dans la version communautaire de Grist.",
+        "Accept": "Accepter",
+        "Accepting…": "Acceptation…",
+        "Enabled encryption since being added": "A activé le chiffrement depuis son ajout",
+        "Waiting for encryption": "En attente du chiffrement",
+        "Added before they enabled encryption. Once they have, an owner accepts them here.": "Ajouté avant d'avoir activé le chiffrement. Une fois que c'est fait, un propriétaire l'accepte ici."
     },
     "SearchModel": {
         "Search all tables": "Rechercher toutes les tables",
@@ -1812,7 +1844,8 @@
         "Some required columns aren't mapped": "Certaines colonnes obligatoires ne sont pas utilisées",
         "To use this widget, please map all non-optional columns from the creator panel on the right.": "Pour utiliser cette vue, utilisez toutes les colonnes obligatoires à partir du panneau du créateur sur la droite.",
         "To use this widget, all mapped columns must be visible. Please contact document owner or modify access rules.": "Pour utiliser ce widget, toutes les colonnes utilisées doivent être visibles. Veuillez contacter le propriétaire du document ou modifier les accès.",
-        "Some required columns are hidden by access rules": "Certaines colonnes obligatoires sont cachées faute d'accès"
+        "Some required columns are hidden by access rules": "Certaines colonnes obligatoires sont cachées faute d'accès",
+        "This widget can't be used in end-to-end encrypted documents: it would see their content.": "Cette vue ne peut pas être utilisée dans les documents chiffrés de bout en bout : elle verrait leur contenu."
     },
     "FormContainer": {
         "Build your own form": "Créez votre propre formulaire",
@@ -2182,7 +2215,8 @@
         "Search": "Rechercher",
         "Widget URL": "URL du widget",
         "Learn more about custom widgets": "En savoir plus sur les Vues personnalisées",
-        "Add Your Own Widget": "Ajouter votre propre widget"
+        "Add Your Own Widget": "Ajouter votre propre widget",
+        "This widget can't be used in end-to-end encrypted documents: it would see their content.": "Cette vue ne peut pas être utilisée dans les documents chiffrés de bout en bout : elle verrait leur contenu."
     },
     "markdown": {
         "The toggle is **off**": "L'interrupteur est sur **désactivé**",
@@ -2716,7 +2750,8 @@
         "Select widget": "Choisir une vue"
     },
     "CoreNewDocMethods": {
-        "Untitled document": "Document sans titre"
+        "Untitled document": "Document sans titre",
+        "Untitled encrypted document": "Document chiffré sans titre"
     },
     "GetGristComProvider": {
         "Sign in with getgrist.com": "Se connecter avec getgrist.com",
@@ -3422,5 +3457,202 @@
         "You've asked for this.": "Vous avez demandé cela.",
         "{{count}} people have asked for this._one": "{{count}} personnes ont demandé cela.",
         "{{count}} people have asked for this._other": "{{count}} personnes ont demandé cela."
+    },
+    "HomeNewDocBlock": {
+        "Encrypted document": "Document chiffré"
+    },
+    "EncryptedDocSession": {
+        "A change by another member contained invalid private values, which are shown as locked.": "Une modification d'un autre membre contenait des valeurs privées invalides, affichées comme verrouillées.",
+        "A change by another member couldn't be applied, and was ignored.": "Une modification d'un autre membre n'a pas pu être appliquée, et a été ignorée.",
+        "An earlier version of this document was restored: it needs reloading.": "Une version antérieure de ce document a été restaurée : il doit être rechargé.",
+        "Attachment not found": "Pièce jointe introuvable",
+        "Cancel": "Annuler",
+        "Enable encryption": "Activer le chiffrement",
+        "Encryption keys are required to open this document": "Des clés de chiffrement sont nécessaires pour ouvrir ce document",
+        "No access to the key of this encrypted document": "Pas d'accès à la clé de ce document chiffré",
+        "Reload": "Recharger",
+        "Reload needed": "Rechargement nécessaire",
+        "The AI assistant is not available for end-to-end encrypted documents": "L'assistant IA n'est pas disponible pour les documents chiffrés de bout en bout",
+        "The encryption service did not create a key for you": "Le service de chiffrement n'a pas créé de clé pour vous",
+        "This document is encrypted, and its owner hasn't set it up yet. It will open as soon as they do.": "Ce document est chiffré, et son propriétaire ne l'a pas encore configuré. Il s'ouvrira dès que ce sera fait.",
+        "This document is encrypted. You must enable encryption on your account to access it.": "Ce document est chiffré. Vous devez activer le chiffrement sur votre compte pour y accéder.",
+        "This is not a link to a Google Drive file": "Ce n'est pas un lien vers un fichier Google Drive",
+        "This is not available for end-to-end encrypted documents": "Ce n'est pas disponible pour les documents chiffrés de bout en bout",
+        "Waiting for access": "En attente d'accès",
+        "Your account is not known to the encryption service": "Votre compte n'est pas connu du service de chiffrement",
+        "Only members who can read the columns this form fills can publish it": "Seuls les membres qui peuvent lire les colonnes que ce formulaire remplit peuvent le publier",
+        "Check again": "Vérifier à nouveau",
+        "To encrypt a document, first enable encryption on your account.": "Pour chiffrer un document, activez d'abord le chiffrement sur votre compte.",
+        "They haven't enabled encryption on their account yet.": "Ce membre n'a pas encore activé le chiffrement sur son compte.",
+        "Review": "Voir",
+        "{{count}} member(s) enabled encryption and are waiting for you to accept them._one": "{{count}} membre a activé le chiffrement et attend que vous l'acceptiez.",
+        "{{count}} member(s) enabled encryption and are waiting for you to accept them._other": "{{count}} membres ont activé le chiffrement et attendent que vous les acceptiez.",
+        "Keys couldn't be replaced after a member lost access: it will be tried again on your next change.": "Les clés n'ont pas pu être remplacées après qu'un membre a perdu l'accès : ce sera retenté lors de votre prochaine modification.",
+        "This document is encrypted. You have access to it, but not yet to its key: it will open as soon as an owner opens it and gives you access.": "Ce document est chiffré. Vous y avez accès, mais pas encore à sa clé : il s'ouvrira dès qu'un propriétaire l'ouvrira et vous donnera accès.",
+        "Reload to see it": "Recharger pour le voir",
+        "You were given access to more of this document.": "Vous avez désormais accès à davantage de ce document.",
+        "Could not give access to private tables and columns to {{members}}.": "Impossible de donner accès aux tables et colonnes privées à {{members}}.",
+        "Only owners with access to all private tables and columns can make members owners.": "Seuls les propriétaires ayant accès à toutes les tables et colonnes privées peuvent rendre des membres propriétaires.",
+        "{{email}} can only become an owner once they have access to the document: add them as an editor or viewer first, and accept them once they enabled encryption.": "{{email}} ne peut devenir propriétaire qu'une fois qu'il a accès au document : ajoutez-le d'abord en tant qu'éditeur ou en lecture seule, et acceptez-le une fois qu'il a activé le chiffrement."
+    },
+    "EncryptionUI": {
+        "A member": "Un membre",
+        "Apply": "Appliquer",
+        "As template (structure only, without data)": "Comme modèle (structure seulement, sans les données)",
+        "Close": "Fermer",
+        "Converting attachments…": "Conversion des pièces jointes…",
+        "Copying the document": "Copie du document",
+        "Discard": "Annuler",
+        "Discard your changes?": "Annuler vos modifications ?",
+        "Dismiss": "Rejeter",
+        "Done": "Terminé",
+        "Duplicate": "Dupliquer",
+        "Duplicate document": "Dupliquer le document",
+        "Encrypt": "Chiffrer",
+        "Encrypt this document end to end?": "Chiffrer ce document de bout en bout ?",
+        "Encrypting this document": "Chiffrement de ce document",
+        "Gave access to {{count}} member(s)._one": "Accès donné à {{count}} membre.",
+        "Gave access to {{count}} member(s)._other": "Accès donné à {{count}} membres.",
+        "Loading…": "Chargement…",
+        "Make private": "Rendre privée",
+        "Make public": "Rendre publique",
+        "Make this column private": "Rendre cette colonne privée",
+        "Make your changes first: they'll be sent as a suggestion.": "Faites d'abord vos modifications : elles seront envoyées comme suggestion.",
+        "Name": "Nom",
+        "PRIVACY": "CONFIDENTIALITÉ",
+        "Preparing the content…": "Préparation du contenu…",
+        "Private column: you don't have access to its values.": "Colonne privée : vous n'avez pas accès à ses valeurs.",
+        "Restore": "Restaurer",
+        "Restore this version?": "Restaurer cette version ?",
+        "Save": "Enregistrer",
+        "Saved": "Enregistré",
+        "Saved by {{name}}": "Enregistré par {{name}}",
+        "Saving…": "Enregistrement…",
+        "Send": "Envoyer",
+        "Send your suggestion": "Envoyer votre suggestion",
+        "Starting…": "Démarrage…",
+        "Suggestion sent.": "Suggestion envoyée.",
+        "Suggestions": "Suggestions",
+        "The changes you made (not sent as a suggestion yet) will be undone.": "Les modifications que vous avez faites (pas encore envoyées comme suggestion) seront annulées.",
+        "There are no suggestions waiting.": "Aucune suggestion en attente.",
+        "This formula uses private columns: only members who can read them can see its results.": "Cette formule utilise des colonnes privées : seuls les membres qui peuvent les lire voient ses résultats.",
+        "Versions of this document are saved regularly (encrypted): the most recent ones are kept.": "Des versions de ce document sont enregistrées régulièrement (chiffrées) : les plus récentes sont conservées.",
+        "What do you suggest, and why? (optional)": "Que suggérez-vous, et pourquoi ? (facultatif)",
+        "Withdraw": "Retirer",
+        "latest": "la plus récente",
+        "{{name}} (copy)": "{{name}} (copie)",
+        "Open it": "L'ouvrir",
+        "The document is encrypted": "Le document est chiffré",
+        "{{count}} access rule(s) limiting edits were dropped._one": "{{count}} règle d'accès limitant les modifications a été supprimée.",
+        "{{count}} access rule(s) limiting edits were dropped._other": "{{count}} règles d'accès limitant les modifications ont été supprimées.",
+        "{{count}} column(s) hidden by access rules are now private columns._one": "{{count}} colonne masquée par des règles d'accès est désormais une colonne privée.",
+        "{{count}} column(s) hidden by access rules are now private columns._other": "{{count}} colonnes masquées par des règles d'accès sont désormais des colonnes privées.",
+        "End-to-end encryption": "Chiffrement de bout en bout",
+        "Make its content readable only in members' browsers: the server can't read it anymore": "Rendre son contenu lisible uniquement dans les navigateurs des membres : le serveur ne peut plus le lire",
+        "On": "Activé",
+        "Only its members' browsers will be able to read it, not the server.": "Seuls les navigateurs de ses membres pourront le lire, pas le serveur.",
+        "The server will be able to read it again.": "Le serveur pourra à nouveau le lire.",
+        "Its content is encrypted in members' browsers: the server can't read it": "Son contenu est chiffré dans les navigateurs des membres : le serveur ne peut pas le lire",
+        "Remove encryption": "Retirer le chiffrement",
+        "Remove encryption from this document?": "Retirer le chiffrement de ce document ?",
+        "Removing encryption": "Retrait du chiffrement",
+        "The copy is encrypted end to end too, with keys of its own. Private columns stay private. Its members (those of its workspace) can read what they could read in this document.": "La copie est aussi chiffrée de bout en bout, avec ses propres clés. Les colonnes privées restent privées. Ses membres (ceux de son espace de travail) peuvent lire ce qu'ils pouvaient lire dans ce document.",
+        "The document will be as it was then: changes since will be undone (they're still in the history, as an earlier version). Members who have it open will reload it.": "Le document sera tel qu'il était alors : les modifications depuis seront annulées (elles restent dans l'historique, comme version antérieure). Les membres qui l'ont ouvert le rechargeront.",
+        "Webhooks, the API and server-side exports stop working. Access rules hiding columns become private columns; rules hiding rows aren't supported (remove them first).": "Les webhooks, l'API et les exports côté serveur cessent de fonctionner. Les règles d'accès masquant des colonnes deviennent des colonnes privées ; les règles masquant des lignes ne sont pas prises en charge (supprimez-les d'abord).",
+        "Your changes ({{count}}) are sent to the members who can edit this document, who may apply them. They're undone here meanwhile._one": "Votre modification est envoyée aux membres qui peuvent modifier ce document, qui pourront l'appliquer. Elle est annulée ici en attendant.",
+        "Your changes ({{count}}) are sent to the members who can edit this document, who may apply them. They're undone here meanwhile._other": "Vos modifications ({{count}}) sont envoyées aux membres qui peuvent modifier ce document, qui pourront les appliquer. Elles sont annulées ici en attendant.",
+        "{{members}} can't read it until they enable encryption and an owner gives them access.": "{{members}} ne pourront pas le lire avant d'avoir activé le chiffrement et qu'un propriétaire leur donne accès.",
+        "{{members}} can't read the copy until they enable encryption and an owner gives them access.": "{{members}} ne pourront pas lire la copie avant d'avoir activé le chiffrement et qu'un propriétaire leur donne accès.",
+        "{{members}} haven't enabled encryption on their account yet: give them access again once they have.": "{{members}} n'ont pas encore activé le chiffrement sur leur compte : donnez-leur accès à nouveau une fois que ce sera fait.",
+        "{{name}} (you)": "{{name}} (vous)",
+        "Its name, its columns and its number of rows stay visible to all members.": "Son nom, ses colonnes et son nombre de lignes restent visibles par tous les membres.",
+        "Make this table private": "Rendre cette table privée",
+        "Private table: you don't have access to its data.": "Table privée : vous n'avez pas accès à ses données.",
+        "Private tables and columns become access rules, so members who couldn't read them still can't.": "Les tables et colonnes privées deviennent des règles d'accès, pour que les membres qui ne pouvaient pas les lire ne le puissent toujours pas.",
+        "All members of the document have access to this column.": "Tous les membres du document ont accès à cette colonne.",
+        "All members of the document have access to this table, except its private columns.": "Tous les membres du document ont accès à cette table, sauf à ses colonnes privées.",
+        "Change who has access": "Modifier qui y a accès",
+        "It's also in a private table: only members with access to both have access to it.": "Elle est aussi dans une table privée : seuls les membres ayant accès aux deux y ont accès.",
+        "It's in a private table: who has access to it is set in the table's settings (Data tab).": "Elle est dans une table privée : qui y a accès se règle dans les paramètres de la table (onglet Données source).",
+        "Private column: only these members have access to it.": "Colonne privée : seuls ces membres y ont accès.",
+        "Private table: only these members have access to it.": "Table privée : seuls ces membres y ont accès.",
+        "Who has access to this column": "Qui a accès à cette colonne",
+        "Who has access to this table": "Qui a accès à cette table",
+        "Private table: only some members have access to it.": "Table privée : seuls certains membres y ont accès.",
+        "Restrict to some of them": "Restreindre à certains d'entre eux",
+        "Respondents can still answer it: only members who can read this column can read their answers.": "Les répondants peuvent toujours y répondre : seuls les membres qui peuvent lire cette colonne peuvent lire leurs réponses.",
+        "{{number}} form answers are waiting. Adding them…_one": "{{number}} réponse au formulaire en attente. Ajout en cours…",
+        "{{number}} form answers are waiting. Adding them…_other": "{{number}} réponses au formulaire en attente. Ajout en cours…",
+        "{{number}} form answers are waiting. You can't add them. {{reason}}_one": "{{number}} réponse au formulaire en attente. Vous ne pouvez pas l'ajouter. {{reason}}",
+        "{{number}} form answers are waiting. You can't add them. {{reason}}_other": "{{number}} réponses au formulaire en attente. Vous ne pouvez pas les ajouter. {{reason}}",
+        "the column {{name}}": "la colonne {{name}}",
+        "the table {{name}}": "la table {{name}}",
+        "{{number}} form answers are waiting. Only editors or owners with access to {{missing}} can add them._one": "{{number}} réponse au formulaire en attente. Seuls les éditeurs ou propriétaires ayant accès à {{missing}} peuvent l'ajouter.",
+        "{{number}} form answers are waiting. Only editors or owners with access to {{missing}} can add them._other": "{{number}} réponses au formulaire en attente. Seuls les éditeurs ou propriétaires ayant accès à {{missing}} peuvent les ajouter.",
+        "Among the members with access to the table, only owners and those you select will see this column's values and the results of formulas using them, and can change them if their role allows it. Others will see a lock instead, and can't change them.": "Parmi les membres ayant accès à la table, seuls les propriétaires et ceux que vous sélectionnez verront les valeurs de cette colonne et les résultats des formules qui les utilisent, et pourront les modifier si leur rôle le permet. Les autres verront un cadenas à la place, et ne pourront pas les modifier.",
+        "Only owners and the members you select will see this column's values and the results of formulas using them, and can change them if their role allows it. Others will see a lock instead, and can't change them.": "Seuls les propriétaires et les membres que vous sélectionnez verront les valeurs de cette colonne et les résultats des formules qui les utilisent, et pourront les modifier si leur rôle le permet. Les autres verront un cadenas à la place, et ne pourront pas les modifier.",
+        "Only owners and the members you select will see this table's data and the results of formulas using it, and can change them if their role allows it. Others will see a lock instead, and can't change them. Its name, columns and number of rows stay visible.": "Seuls les propriétaires et les membres que vous sélectionnez verront les données de cette table et les résultats des formules qui les utilisent, et pourront les modifier si leur rôle le permet. Les autres verront un cadenas à la place, et ne pourront pas les modifier. Son nom, ses colonnes et son nombre de lignes restent visibles.",
+        "There are no other members than owners.": "Il n'y a pas d'autres membres que les propriétaires.",
+        "This page shows private tables: only some members have access to them._one": "Cette page affiche une table privée : seuls certains membres y ont accès.",
+        "This page shows private tables: only some members have access to them._other": "Cette page affiche des tables privées : seuls certains membres y ont accès."
+    },
+    "localAssistant": {
+        "API key": "Clé d'API",
+        "API key for {{provider}}": "Clé d'API pour {{provider}}",
+        "Cancel": "Annuler",
+        "I agree": "J'accepte",
+        "It doesn't send the values in cells. The service is run by {{provider}}.": "Il n'envoie pas les valeurs des cellules. Le service est opéré par {{provider}}.",
+        "It's NOT a sovereign service: your data may be subject to foreign laws.": "Ce n'est PAS un service souverain : vos données peuvent être soumises à des lois étrangères.",
+        "It's a sovereign service.": "C'est un service souverain.",
+        "Save": "Enregistrer",
+        "Send this document's structure to an AI service?": "Envoyer la structure de ce document à un service d'IA ?",
+        "The AI assistant needs an API key": "L'assistant IA a besoin d'une clé d'API",
+        "The AI assistant needs your agreement to be used": "L'assistant IA a besoin de votre accord pour être utilisé",
+        "The AI service refused the request: check your API key": "Le service d'IA a refusé la requête : vérifiez votre clé d'API",
+        "The AI service returned an error ({{status}})": "Le service d'IA a renvoyé une erreur ({{status}})",
+        "The AI service returned an error ({{status}}): {{message}}": "Le service d'IA a renvoyé une erreur ({{status}}) : {{message}}",
+        "The AI service returned an invalid answer": "Le service d'IA a renvoyé une réponse invalide",
+        "You'll be asked again in your next session.": "La question vous sera reposée lors de votre prochaine session.",
+        "what you ask the assistant.": "ce que vous demandez à l'assistant.",
+        "The AI assistant uses your own API key for this service. It's kept in this browser only (Grist's server never sees it).": "L'assistant IA utilise votre propre clé d'API pour ce service. Elle est conservée uniquement dans ce navigateur (le serveur de Grist ne la voit jamais).",
+        "This document is end-to-end encrypted. To help you with formulas, the assistant sends, from your browser:": "Ce document est chiffré de bout en bout. Pour vous aider avec les formules, l'assistant envoie, depuis votre navigateur :",
+        "the structure of the document: names and types of its tables and columns (including the choices of choice columns), and their formulas;": "la structure du document : noms et types de ses tables et colonnes (y compris les options des colonnes à choix), et leurs formules ;"
+    },
+    "lockOverlay": {
+        "A member": "Un membre",
+        "Please wait": "Veuillez patienter",
+        "{{name}} is encrypting this document end to end. It will open again as soon as it's done.": "{{name}} chiffre ce document de bout en bout. Il se rouvrira dès que ce sera terminé.",
+        "{{name}} is removing encryption from this document. It will open again as soon as it's done.": "{{name}} retire le chiffrement de ce document. Il se rouvrira dès que ce sera terminé.",
+        "{{name}} is restoring an earlier version of this document. It will open again as soon as it's done.": "{{name}} restaure une version antérieure de ce document. Il se rouvrira dès que ce sera terminé."
+    },
+    "sortUtil": {
+        "This order is based on private columns: saving it would reveal it to all members.": "Cet ordre repose sur des colonnes privées : l'enregistrer le révélerait à tous les membres."
+    },
+    "AppUI": {
+        "Opening the encrypted document": "Ouverture du document chiffré"
+    },
+    "EncryptedAccessRules": {
+        "Access rules": "Règles d'accès",
+        "Conditions on user attributes, or on links shared with others": "Des conditions sur les attributs des utilisateurs, ou sur des liens partagés",
+        "Different editing permissions per table or column, and checks of new values": "Des droits de modification différents par table ou colonne, et des contrôles des nouvelles valeurs",
+        "Hiding some rows or cells, depending on their content": "Masquer certaines lignes ou cellules, selon leur contenu",
+        "Manage users": "Gérer les utilisateurs",
+        "Not available in encrypted documents": "Non disponible dans les documents chiffrés",
+        "Open settings": "Ouvrir les paramètres",
+        "Private column": "Colonne privée",
+        "Private table": "Table privée",
+        "Private tables and columns": "Tables et colonnes privées",
+        "Roles": "Rôles",
+        "These access rules need the server to read the data:": "Ces règles d'accès nécessitent que le serveur lise les données :",
+        "This document is end-to-end encrypted: the server can't read its data, so it can't apply access rules with conditions.": "Ce document est chiffré de bout en bout : le serveur ne peut pas lire ses données, il ne peut donc pas appliquer de règles d'accès avec des conditions.",
+        "To use them, remove encryption from the document in its ": "Pour les utiliser, retirez le chiffrement du document dans ses ",
+        "Viewing the document as another user": "Voir le document en tant qu'un autre utilisateur",
+        "You don't have access to it.": "Vous n'y avez pas accès.",
+        "settings": "paramètres",
+        "{{name}} (you)": "{{name}} (vous)",
+        "None: all members have access to the whole document.": "Aucune : tous les membres ont accès à tout le document.",
+        "None: all members have access to the whole document. To make a table or column private, open its settings in the right panel.": "Aucune : tous les membres ont accès à tout le document. Pour rendre une table ou une colonne privée, ouvrez ses paramètres dans le panneau de droite.",
+        "Owners can make whole tables or columns private: only owners and the members they choose get their keys, to see them and, if their role allows it, change them. What members can change otherwise depends on their role.": "Les propriétaires peuvent rendre privées des tables ou des colonnes entières : seuls les propriétaires et les membres qu'ils choisissent reçoivent leurs clés, pour les voir et, si leur rôle le permet, les modifier. Pour le reste, ce que les membres peuvent modifier dépend de leur rôle.",
+        "Viewers can only view. Editors and owners can change what they have access to. Owners manage members and privacy.": "Les membres en lecture seule peuvent seulement consulter. Les éditeurs et propriétaires peuvent modifier ce à quoi ils ont accès. Les propriétaires gèrent les membres et la confidentialité."
     }
 }

@@ -84,6 +84,8 @@ export interface PendingEncryption {
   // By email, with whether they enabled encryption since, and can be accepted (given the key).
   getPendingEncryption(): Promise<Map<string, { canAccept: boolean }>>;
   acceptMember(email: string): Promise<void>;
+  // Before members are made owners: gives them access to all private tables and columns.
+  prepareOwners(emails: string[]): Promise<void>;
 }
 
 // Returns an instance of UserManagerModel given IUserManagerOptions. Makes the async call for the
@@ -115,6 +117,9 @@ export function showUserManagerModal(userApi: UserAPI, options: IUserManagerOpti
       try {
         const isAnythingChanged = model.isAnythingChanged.get();
         if (isAnythingChanged) {
+          const newOwners = Object.entries(model.getDelta().users || {})
+            .filter(([, role]) => role === roles.OWNER).map(([email]) => email);
+          if (newOwners.length > 0) { await options.pendingEncryption?.prepareOwners(newOwners); }
           await model.save(userApi, options.resourceId);
         }
         await options.onSave?.(model.isPersonal);

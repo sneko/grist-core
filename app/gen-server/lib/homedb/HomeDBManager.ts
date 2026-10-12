@@ -47,7 +47,7 @@ import { Alias } from "app/gen-server/entity/Alias";
 import { BillingAccount } from "app/gen-server/entity/BillingAccount";
 import { BillingAccountManager } from "app/gen-server/entity/BillingAccountManager";
 import { Config } from "app/gen-server/entity/Config";
-import { DocEncryptionKey, DocEncryptionKeyWrap } from "app/gen-server/entity/DocEncryption";
+import { DocEncryptionKey, DocEncryptionKeyWrap, DocEncryptionScope } from "app/gen-server/entity/DocEncryption";
 import { DocPref } from "app/gen-server/entity/DocPref";
 import { Document, FilteredDocument } from "app/gen-server/entity/Document";
 import { Group } from "app/gen-server/entity/Group";
@@ -2479,6 +2479,9 @@ export class HomeDBManager implements HomeDBAuth {
       }
       if (isEncryptedDoc(doc)) {
         await this._failIfEncryptedDocsUnreadable(manager, [doc.id]);
+        const newOwners = Object.entries(userIdDelta || {})
+          .filter(([id, role]) => role === roles.OWNER && Number(id) !== userId).map(([id]) => Number(id));
+        await this._failIfEncryptedDocOwnersLackKeys(manager, doc.id, newOwners);
       }
       if (userIdDelta) {
         // The callback approach is to publish the invalidation after the transaction commits.
@@ -4349,6 +4352,40 @@ export class HomeDBManager implements HomeDBAuth {
       if (!readable) {
         throw new ApiError(`This would leave nobody able to read the encrypted document "${docHolders[0].name}": ` +
           "keep at least one member holding its key with access to it", 400);
+      }
+    }
+  }
+
+  /**
+   * Owners of encrypted documents have access to all their private tables and columns. Members can
+   * only be made owners of a document with private ones once they hold all their keys (given by an
+   * owner's browser, as the sharing dialog does before saving): otherwise they'd be owners unable
+   * to manage what they can't read, until an owner holding the keys gives them out.
+   */
+  private async _failIfEncryptedDocOwnersLackKeys(manager: EntityManager, docId: string, userIds: number[]) {
+    if (userIds.length === 0) { return; }
+    const privateKeys: { keyId: string }[] = await manager.createQueryBuilder()
+      .select("keys.key_id", "keyId")
+      .from(DocEncryptionScope, "scopes")
+      .innerJoin(DocEncryptionKey, "keys", "keys.doc_id = scopes.doc_id AND keys.scope = scopes.scope")
+      .where("scopes.doc_id = :docId", { docId })
+      .andWhere("scopes.released_at IS NULL")
+      .andWhere("keys.retired_at IS NULL")
+      .getRawMany();
+    if (privateKeys.length === 0) { return; }
+    const wraps: { userId: number, keyId: string }[] = await manager.createQueryBuilder()
+      .select("wraps.user_id", "userId")
+      .addSelect("wraps.key_id", "keyId")
+      .from(DocEncryptionKeyWrap, "wraps")
+      .where("wraps.doc_id = :docId", { docId })
+      .andWhere("wraps.user_id IN (:...userIds)", { userIds })
+      .andWhere("wraps.key_id IN (:...keyIds)", { keyIds: privateKeys.map(k => k.keyId) })
+      .getRawMany();
+    for (const userId of userIds) {
+      const held = new Set(wraps.filter(w => Number(w.userId) === userId).map(w => w.keyId));
+      if (!privateKeys.every(k => held.has(k.keyId))) {
+        throw new ApiError("Owners of this encrypted document have access to its private tables and columns: " +
+          "make members owners from its sharing dialog, which gives them access first", 400);
       }
     }
   }

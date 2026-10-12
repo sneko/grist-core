@@ -111,9 +111,10 @@ const cssTag = styled("span", `
   margin-left: 4px;
 `);
 
-// A tag with an icon: the icon is taller than the text line, so they're laid out side by side.
-// A tag with an icon, a little smaller than the text around it (so it fits the line with room).
+// A tag with an icon, a little smaller than the text around it (so it fits the line with room),
+// spaced from the document's name as its public icon is.
 const cssIconTag = styled(cssTag, `
+  margin-left: 8px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -279,6 +280,15 @@ not affect the original document.`) }), testId("fiddle-tag"));
         dom.cls(cssHideForNarrowScreen.className),
       ],
     }),
-    options.afterPageName,
+    options.afterPageName ? cssAfterPageName(options.afterPageName) : null,
   );
 }
+
+// (Centered on the page's name: "middle" alone puts small icons a pixel below its center.)
+const cssAfterPageName = styled("span", `
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  position: relative;
+  top: -1px;
+`);

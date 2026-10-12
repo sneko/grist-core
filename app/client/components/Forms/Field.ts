@@ -123,8 +123,9 @@ export class FieldModel extends BoxModel {
     // Updated question is used for editing, we don't save on every key press, but only on blur (or enter, etc).
     const save = (value: string) => {
       value = value?.trim();
-      // If question is empty or same as original, don't save.
-      if (!value || value === this.field.peek().question()) {
+      // If question is empty or same as shown (the question, or the column's label without one),
+      // don't save: nothing changed.
+      if (!value || value === this.question.get()) {
         return;
       }
       this.field.peek().question.setAndSave(value).catch(reportError);

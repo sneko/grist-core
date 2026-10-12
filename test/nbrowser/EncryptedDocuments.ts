@@ -472,6 +472,14 @@ describe("EncryptedDocuments", function() {
         (await e.find(".test-page-private-marker").isPresent()) ? e.find(".test-docpage-label").getText() : null);
       assert.deepEqual(pagesWithLock.filter(Boolean), ["Payroll"]);
       assert.lengthOf(await driver.findAll(".test-page-private-marker"), 2);
+      await gu.openPage("Payroll");
+      await driver.find(".test-top-header .test-page-private-marker").mouseMove();
+      assert.equal(await driver.findWait(".test-tooltip", 2000).getText(),
+        "This page shows a private table: only some members have access to it.");
+      // It stays once the page's item is built again (e.g. after renaming the page).
+      await gu.renamePage("Payroll", "Payroll");
+      assert.lengthOf(await driver.findAll(".test-page-private-marker"), 2);
+      await gu.checkForErrors();
 
       // A column of it can be restricted further, to some of the table's members (here, the owner
       // alone): only that column gets a lock.
@@ -533,9 +541,9 @@ describe("EncryptedDocuments", function() {
       await driver.find(".test-tools-access-rules").click();
       await driver.findContentWait(".test-acl-encrypted-target", /^Payroll$/, 5000);
       await gu.waitToPass(async () => {
-        // (Those of the table, and those of its restricted column.)
+        // (Those of the table, and those of its restricted column; owners always have access.)
         assert.deepEqual((await driver.findAll(".test-acl-encrypted-member", e => e.getText())).sort(),
-          ["Chimpy (you)", "Chimpy (you)", editor.name].sort());
+          ["Chimpy (you)", "Chimpy (you)", "Support", "Support", editor.name].sort());
       }, 5000);
       assert.isTrue(await driver.find(".test-acl-encrypted-settings").isPresent());
       await driver.find(".test-acl-encrypted-open").click();
@@ -571,7 +579,7 @@ describe("EncryptedDocuments", function() {
       await driver.find(".test-modal-confirm").click();
       await gu.waitToPass(async () => {
         assert.sameMembers(await driver.findAll(".test-column-audience-member", e => e.getText()),
-          ["Chimpy (you)", editor.name]);
+          ["Chimpy (you)", "Support", editor.name]);
       }, 10000);
       // They're told, and see it once they reload (values they had locked come with the document).
       await switchTo(editorWindow);
@@ -596,11 +604,13 @@ describe("EncryptedDocuments", function() {
       await driver.findContentWait(".test-modal-dialog label", new RegExp(`^${editor.name} `), 5000).click();
       await driver.find(".test-modal-confirm").click();
       await gu.waitToPass(async () => {
-        assert.deepEqual(await driver.findAll(".test-table-audience-member", e => e.getText()), ["Chimpy (you)"]);
+        assert.sameMembers(await driver.findAll(".test-table-audience-member", e => e.getText()),
+          ["Chimpy (you)", "Support"]);
       }, 10000);
       await gu.openColumnPanel("Note");
       await gu.waitToPass(async () => {
-        assert.deepEqual(await driver.findAll(".test-column-audience-member", e => e.getText()), ["Chimpy (you)"]);
+        assert.sameMembers(await driver.findAll(".test-column-audience-member", e => e.getText()),
+          ["Chimpy (you)", "Support"]);
       }, 10000);
       await switchTo(editorWindow);
       await gu.waitToPass(async () => {
@@ -657,6 +667,53 @@ describe("EncryptedDocuments", function() {
           "Cleo");
       }, 20000);
     });
+    it("gives owners access to all private tables and columns", async function() {
+      // The editor can't read Salary, until made an owner: owners have access to everything.
+      await switchTo(editorWindow);
+      await gu.openPage("Staff");
+      assert.deepEqual(await gu.getVisibleGridCells({ section: "STAFF", cols: ["Salary"], rowNums: [1] }), ["🔒"]);
+      // Not without getting access first: the server refuses it (e.g. through the API).
+      await assert.isRejected(ownerApi.updateDocPermissions(docId, { users: { [editor.email]: "owners" } }),
+        /make members owners from its sharing dialog/);
+      // The sharing dialog gives them access, then makes them owner.
+      await switchTo(ownerWindow);
+      await driver.find(".test-tb-share").click();
+      await driver.findContentWait(".test-tb-share-option", /Manage users/, 2000).click();
+      await driver.findContentWait(".test-um-member", editor.email, 5000).find(".test-um-member-role").click();
+      await driver.findContentWait(".test-um-role-option", /Owner/, 2000).click();
+      await driver.find(".test-um-confirm").click();
+      await gu.waitToPass(async () => assert.isFalse(await driver.find(".test-um-members").isPresent()), 10000);
+      assert.equal((await ownerApi.getDocAccess(docId)).users.find(u => u.email === editor.email)?.access, "owners");
+      await switchTo(editorWindow);
+      await gu.waitToPass(async () => {
+        assert.match((await gu.getToasts()).join("\n"), /given access to more of this document/);
+      }, 20000);
+      const session = await gu.session().user("user2").teamSite.addLogin();
+      await session.loadDoc(`/doc/${docId}`, { wait: false });
+      await gu.waitForDocToLoad(ENGINE_LOAD_MS);
+      await gu.openPage("Staff");
+      await gu.waitToPass(async () => {
+        assert.notEqual((await gu.getVisibleGridCells({ section: "STAFF", cols: ["Salary"], rowNums: [1] }))[0], "🔒");
+      }, 10000);
+      await gu.checkForErrors();
+
+      // Owners aren't chosen among those who have access: they always do.
+      await switchTo(ownerWindow);
+      await gu.openPage("Staff");
+      await gu.getCell({ section: "STAFF", col: "Salary", rowNum: 1 }).click();
+      await gu.openColumnPanel();
+      await gu.waitToPass(async () => {
+        assert.include(await driver.findAll(".test-column-audience-member", e => e.getText()), editor.name);
+      }, 10000);
+      await driver.find(".test-column-change-audience").click();
+      await driver.findWait(".test-modal-dialog", 2000);
+      await gu.waitToPass(async () => {
+        assert.notInclude(await driver.find(".test-modal-dialog").getText(), "Loading");
+      }, 5000);
+      assert.notInclude(await driver.findAll(".test-audience-member", e => e.getText()),
+        `${editor.name} (${editor.email})`);
+      await driver.find(".test-modal-cancel").click();
+    });
   });
 
   describe("whole documents", function() {
@@ -696,7 +753,7 @@ describe("EncryptedDocuments", function() {
       await driver.findWait(".test-encryption-encrypt", 5000).click();
       await driver.findWait(".test-modal-confirm", 2000).click();
       // Once done, it says what became of the access rule.
-      await driver.findContentWait(".test-modal-dialog", /1 column\(s\) hidden by access rules are now private/, 30000);
+      await driver.findContentWait(".test-modal-dialog", /1 column hidden by access rules is now a private column/, 30000);
       assert.deepEqual((await ownerApi.getDoc(docId)).options?.encryption, { version: 1 });
       await driver.find(".test-encryption-summary-ok").click();
       await gu.waitToPass(async () => {

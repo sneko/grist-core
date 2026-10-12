@@ -94,6 +94,15 @@ later by an owner (see below).
   with all members, by any member who can read them, as soon as one can: until then, snapshots
   aren't saved, as members who can't read them would save them locked). New columns never get
   the id of a removed private column, which would make them private too.
+- **Owners have access to all private tables and columns**: they're always among those who have
+  access (not chosen in "Who has access", and never removed from it). In a document with private
+  tables or columns, the server refuses to make members owners until they hold all their keys
+  (`_failIfEncryptedDocOwnersLackKeys()`, whatever the way, e.g. the REST API). The sharing dialog
+  first has the owner's browser give them these keys (`prepareOwners()`, re-wrapped by the
+  encryption service: the server never gets them), then saves the role. Only owners holding all
+  these keys can do it, and only for members holding the document key (accepted ones). Keys are
+  never given out otherwise without an owner's action. (Owners inherited from a workspace or site
+  aren't checked.)
 - **Private tables** use column keys too: a table made private (table settings › Data › Privacy)
   has all its columns private with the table's key, including columns added later (its binding
   says the table: `colRef` holds minus the table's row id, see `tableTarget()`). A column of a

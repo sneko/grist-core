@@ -43,6 +43,8 @@ export interface IDocEncryption {
   listMembers(): Promise<EncryptionMember[]>;
   getPendingMembers(): Promise<EncryptionMember[]>;
   grantPendingKeys(): Promise<KeyGrantResult>;
+  /** Before members are made owners: gives them the keys of all private tables and columns. */
+  prepareOwners(emails: string[]): Promise<void>;
   getPendingEncryption(): Promise<Map<string, { canAccept: boolean }>>;
   acceptMember(email: string): Promise<void>;
   setReviewMembers(review: () => void): void;

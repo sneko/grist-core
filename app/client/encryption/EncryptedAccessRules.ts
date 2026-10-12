@@ -44,7 +44,7 @@ export function buildEncryptedAccessRules(owner: MultiHolder, gristDoc: GristDoc
     SectionCard(t("Access rules"), [
       cssIntro(
         dom("p", t(`This document is end-to-end encrypted: the server can't read its data, so it can't apply access rules with conditions.`)),
-        dom("p", t(`Owners can make whole tables or columns private: only the members they choose get their keys, to see them and, if their role allows it, change them. What members can change otherwise depends on their role.`)),
+        dom("p", t(`Owners can make whole tables or columns private: only owners and the members they choose get their keys, to see them and, if their role allows it, change them. What members can change otherwise depends on their role.`)),
       ),
       SectionItem({
         id: "encryption-roles",

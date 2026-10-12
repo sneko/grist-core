@@ -485,8 +485,42 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
   }
 
   /**
-   * Makes a column private: only the given members (and the current user) will be able to read
-   * it, and formulas using it. Its current values are re-encrypted, and the server drops what it
+   * Owners have access to all private tables and columns: before members are made owners (from
+   * the sharing dialog), gives them the keys of all of them. The server refuses to make members
+   * owners of a document with private ones until they hold these keys. Only owners holding all of
+   * them can, and only for members who hold the document's key (accepted ones).
+   */
+  public async prepareOwners(emails: string[]): Promise<void> {
+    const scopes = this.privacy.allScopes();
+    if (scopes.length === 0) { return; }
+    if (!scopes.every(scope => this._keyring.canUseScope(scope))) {
+      throw new Error(t("Only owners with access to all private tables and columns can make members owners."));
+    }
+    const docKeyId = this._keyring.currentKeyId(DOC_SCOPE);
+    const members = await this.listMembers();
+    const owners: EncryptionMember[] = [];
+    for (const email of emails) {
+      const member = members.find(m => m.email === email);
+      if (!member?.keyIds.includes(docKeyId)) {
+        throw new Error(t(`{{email}} can only become an owner once they have access to the document: add them as an editor or viewer first, and accept them once they enabled encryption.`, { email }));
+      }
+      owners.push(member);
+    }
+    for (const scope of scopes) {
+      const keyId = this._keyring.currentKeyId(scope);
+      const missing = owners.filter(m => !m.keyIds.includes(keyId));
+      if (missing.length === 0) { continue; }
+      const { notReady } = await this.shareScope(scope, missing);
+      if (notReady.length > 0) {
+        throw new Error(t("Could not give access to private tables and columns to {{members}}.",
+          { members: notReady.map(m => m.email).join(", ") }));
+      }
+    }
+  }
+
+  /**
+   * Makes a column private: only the given members (and owners, including the current user) will
+   * be able to read it, and formulas using it. Its current values are re-encrypted, and the server drops what it
    * had of them in readable form (older changes and snapshots).
    */
   public async makeColumnPrivate(colRef: number, userIds: number[]): Promise<KeyGrantResult> {
@@ -523,8 +557,10 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
   public async setScopeAudience(scope: string, userIds: number[]): Promise<KeyGrantResult> {
     const members = await this.listMembers();
     const holders = members.filter(m => m.keyIds.some(keyId => this._keyring.getKey(keyId)?.scope === scope));
-    const toAdd = members.filter(m => userIds.includes(m.userId) && !holders.includes(m));
-    const toRemove = holders.filter(m => !userIds.includes(m.userId) && m.userId !== this.userId);
+    // (Owners always have access: see prepareOwners().)
+    const toAdd = members.filter(m => (userIds.includes(m.userId) || m.access === "owners") && !holders.includes(m));
+    const toRemove = holders.filter(m => !userIds.includes(m.userId) && m.userId !== this.userId &&
+      m.access !== "owners");
     const result: KeyGrantResult = toAdd.length > 0 ? await this.shareScope(scope, toAdd) :
       { granted: [], notReady: [] };
     if (toRemove.length > 0) {
@@ -818,10 +854,13 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
   }
 
   // Members who set up their keys with the encryption service (who can be given keys), and others.
-  // Makes a column or table private (see tableTarget()) to the given members and the user.
+  // Makes a column or table private (see tableTarget()) to the given members, and owners
+  // (including the user) who hold the document's key.
   private async _makePrivate(target: number, userIds: number[]): Promise<KeyGrantResult> {
     const members = await this.listMembers();
-    const chosen = members.filter(m => m.userId === this.userId || userIds.includes(m.userId));
+    const docKeyId = this._keyring.currentKeyId(DOC_SCOPE);
+    const chosen = members.filter(m => m.userId === this.userId || userIds.includes(m.userId) ||
+      (m.access === "owners" && m.keyIds.includes(docKeyId)));
     const { ready, notReady } = await this._splitByReadiness(chosen);
     if (!ready.some(m => m.userId === this.userId)) {
       throw new Error(t("Your account is not known to the encryption service"));
@@ -958,10 +997,13 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
     setTimeout(() => {
       this._importScheduled = false;
       if (this.isDisposed()) { return; }
-      this._track(this._localDoc.importFormAnswers(entries =>
+      // (Owners first bring forms up to date: answers filling columns made private since a form was
+      // last published are only read once it is, see _syncForms().)
+      const formsSynced = this.isOwner ? this._syncForms() : Promise.resolve();
+      this._track(formsSynced.then(() => this._localDoc.importFormAnswers(entries =>
         readFormAnswers(this._localDoc.docData, this._localDoc.privacy, entries,
           makeFormAnswerHelpers(this._relay, this._keyring)),
-      ).then(() => { this._importBlocked = null; }).catch((e) => {
+      )).then(() => { this._importBlocked = null; }).catch((e) => {
         // Answers this member can't add (e.g. they'd need keys they don't hold) are left for others.
         if (e instanceof EncryptionAccessError) {
           console.warn("[encryption] Leaving form answers to members with access", e);
@@ -985,6 +1027,10 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
 
   private async _syncForms() {
     for (const { sectionId, keys } of getPublishedForms(this._localDoc.docData)) {
+      // Members who can't read all the columns it fills leave it to those who can (what they'd
+      // give respondents would lack what they can't read).
+      if (!getFormScopes(this._localDoc.docData, this._localDoc.privacy, sectionId)
+        .every(scope => this._keyring.canUseScope(scope))) { continue; }
       // Columns it fills became private (or public), or their keys changed: owners publish it again,
       // so that answers stay readable by those (and only those) who can read these columns.
       if (this.isOwner && !this._isFormSealedFor(keys, this._formScopes(sectionId))) {
