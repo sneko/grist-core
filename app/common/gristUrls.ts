@@ -1061,18 +1061,36 @@ export interface GristLoadConfig {
 }
 
 /**
- * How browsers reach the encryption service holding users' keys, for end-to-end encrypted
- * documents. With mockVault, a stand-in with a hardcoded key is used instead (tests only).
+ * What browsers need for end-to-end encrypted documents: above all, the provider holding users'
+ * keys and how to reach it (see app/client/encryption/providers).
  */
 export interface EncryptionClientConfig {
-  vaultUrl?: string;
-  interfaceUrl?: string;
-  mockVault?: boolean;
-  mockKey?: string;
+  provider: EncryptionProviderConfig;
   // URL prefixes of custom widgets allowed in encrypted documents, besides those Grist serves.
   allowedWidgets?: string[];
   // An AI service browsers may call directly for encrypted documents (the server can't).
   assistant?: EncryptionAssistantConfig;
+}
+
+/**
+ * The provider of users' encryption keys (GRIST_ENCRYPTION_PROVIDER), with its own settings:
+ *  - "lasuite": the LaSuite encryption service (https://github.com/suitenumerique/encryption),
+ *    the one LaSuite Docs and Drive use, whose vault holds users' keys in an iframe of its own
+ *    origin;
+ *  - "mock": a stand-in with a hardcoded key, for tests and development only (no security).
+ */
+export type EncryptionProviderConfig = LaSuiteEncryptionProviderConfig | MockEncryptionProviderConfig;
+
+export interface LaSuiteEncryptionProviderConfig {
+  kind: "lasuite";
+  // Origins of the service's vault (its client.js is loaded from there) and of its interface.
+  vaultUrl: string;
+  interfaceUrl: string;
+}
+
+export interface MockEncryptionProviderConfig {
+  kind: "mock";
+  key?: string;  // 64 hex characters; a default is used otherwise.
 }
 
 /**

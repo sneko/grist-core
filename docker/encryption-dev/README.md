@@ -39,7 +39,7 @@ No Keycloak needed. Grist's test login lets you sign in as anyone (any email, no
 
 ```bash
 GRIST_ENCRYPTION_FEATURE_ENABLED=true \
-GRIST_ENCRYPTION_MOCK_VAULT=true \
+GRIST_ENCRYPTION_PROVIDER=mock \
 GRIST_TEST_LOGIN=1 \
 yarn start
 ```
@@ -137,8 +137,9 @@ GRIST_OIDC_IDP_ISSUER=http://localhost:7310/realms/grist \
 GRIST_OIDC_IDP_CLIENT_ID=grist \
 GRIST_OIDC_IDP_CLIENT_SECRET=grist-dev-secret \
 GRIST_ENCRYPTION_FEATURE_ENABLED=true \
-GRIST_ENCRYPTION_VAULT_URL=http://data.encryption.localhost:7200 \
-GRIST_ENCRYPTION_INTERFACE_URL=http://encryption.localhost:7200 \
+GRIST_ENCRYPTION_PROVIDER=lasuite \
+GRIST_ENCRYPTION_LASUITE_VAULT_URL=http://data.encryption.localhost:7200 \
+GRIST_ENCRYPTION_LASUITE_INTERFACE_URL=http://encryption.localhost:7200 \
 yarn start
 ```
 
@@ -146,8 +147,8 @@ If Grist runs in a VM or container (e.g. Lima) and the browser on the host gets 
 refused", add `GRIST_HOST=0.0.0.0`: by default Grist may only listen on `localhost` inside it
 (even only on IPv6 `::1`), which port forwarding doesn't reach.
 
-Do not set `GRIST_TEST_LOGIN` nor `GRIST_ENCRYPTION_MOCK_VAULT` here: the test login replaces
-the OIDC login, and the mock vault replaces the encryption service. Add `GRIST_IN_SERVICE=true`
+Do not set `GRIST_TEST_LOGIN` nor `GRIST_ENCRYPTION_PROVIDER=mock` here: the test login replaces
+the OIDC login, and the mock provider replaces the encryption service. Add `GRIST_IN_SERVICE=true`
 if pages redirect to `/boot` (see above).
 
 ### 4. Try it with several users

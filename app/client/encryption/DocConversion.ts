@@ -51,10 +51,12 @@ export type ProgressCallback = (fraction: number, step: string) => void;
 interface Tables { [tableId: string]: TableDataAction }
 type Member = Omit<EncryptionMember, "keyIds">;
 
-/** How encryption identifies members (needed to give them keys), if it can. */
-export function makeVaultIdFor(config: EncryptionClientConfig) {
-  return (m: { userId: number, vaultUserId: string | null }) =>
-    m.vaultUserId || (config.mockVault ? `grist-user-${m.userId}` : null);
+/**
+ * How the encryption provider identifies members (needed to give them keys), if it can: the server
+ * computes it for the configured provider (see encryptionUserIdFor()).
+ */
+export function makeVaultIdFor() {
+  return (m: { userId: number, vaultUserId: string | null }) => m.vaultUserId;
 }
 
 /**
@@ -64,7 +66,7 @@ export function makeVaultIdFor(config: EncryptionClientConfig) {
 export async function ensureReadyToEncrypt(comm: Comm, docId: string, config: EncryptionClientConfig) {
   const identity: { userId: number, vaultUserId: string | null } =
     await new CommRelay(comm, docId).call("getEncryptionIdentity");
-  if (!makeVaultIdFor(config)(identity)) { throw new Error("Your account is not known to the encryption service"); }
+  if (!makeVaultIdFor()(identity)) { throw new Error("Your account is not known to the encryption service"); }
   const vault = await getKeyVault(config, identity.vaultUserId);
   await ensureVaultKeys(vault, "encrypt");
   return vault;
@@ -83,7 +85,7 @@ export async function encryptDocument(comm: Comm, docId: string, userId: number,
   try {
     onProgress(0, "start");
     // The user's own encryption setup comes first: nothing is touched until it's there.
-    const vaultIdFor = makeVaultIdFor(config);
+    const vaultIdFor = makeVaultIdFor();
     const identity: { userId: number, vaultUserId: string | null } = await relay.call("getEncryptionIdentity");
     if (!vaultIdFor(identity)) { throw new Error("Your account is not known to the encryption service"); }
     const vault = await getKeyVault(config, identity.vaultUserId);

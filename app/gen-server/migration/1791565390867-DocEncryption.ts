@@ -45,7 +45,8 @@ export class DocEncryption1791565390867 implements MigrationInterface {
         { name: "key_id", type: "varchar", isPrimary: true },
         { name: "user_id", type: "integer", isPrimary: true },
         { name: "wrapped_key", type: "text" },
-        // Version of the member's own encryption key this copy was wrapped with.
+        // Version of the key this copy was wrapped with (the member's own, with providers where each
+        // member has keys, see app/server/lib/encryption/encryptionProviders.ts).
         { name: "key_version", type: "integer" },
         { name: "created_by", type: "integer", isNullable: true },
         { name: "created_at", type: datetime, default: now },

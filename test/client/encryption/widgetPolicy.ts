@@ -26,7 +26,7 @@ describe("encryption/widgetPolicy", function() {
   it("allows widgets under the prefixes the server's configuration allows", function() {
     setConfig({
       homeUrl: "https://grist.example.com/",
-      encryption: { mockVault: true, allowedWidgets: ["https://widgets.example.com/trusted/"] },
+      encryption: { provider: { kind: "mock" }, allowedWidgets: ["https://widgets.example.com/trusted/"] },
     });
     assert.isTrue(isWidgetAllowedInEncryptedDoc("https://widgets.example.com/trusted/chart.html"));
     assert.isFalse(isWidgetAllowedInEncryptedDoc("https://widgets.example.com/other/chart.html"));

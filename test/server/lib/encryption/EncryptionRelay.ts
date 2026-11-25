@@ -10,7 +10,7 @@ import {
 } from "app/common/encryption/EncryptionTypes";
 import { UserAPI } from "app/common/UserAPI";
 import { DocEncryptionKey, DocEncryptionKeyWrap } from "app/gen-server/entity/DocEncryption";
-import { getEncryptionClientConfig } from "app/server/lib/encryption/encryptionConfig";
+import { encryptionUserIdFor, getEncryptionClientConfig } from "app/server/lib/encryption/encryptionConfig";
 import { Deps as RelayDeps } from "app/server/lib/encryption/EncryptionRelay";
 import { SQLiteDB } from "app/server/lib/SQLiteDB";
 import { TestServer } from "test/gen-server/apiUtils";
@@ -118,16 +118,73 @@ describe("encryption/EncryptionRelay", function() {
       process.env.GRIST_ENCRYPTION_FEATURE_ENABLED = "false";
       assert.isUndefined(getEncryptionClientConfig());
       process.env.GRIST_ENCRYPTION_FEATURE_ENABLED = "true";
-      assert.throws(() => getEncryptionClientConfig(), /requires GRIST_ENCRYPTION_VAULT_URL/);
-      process.env.GRIST_ENCRYPTION_VAULT_URL = "https://vault.example.com";
-      process.env.GRIST_ENCRYPTION_INTERFACE_URL = "https://interface.example.com";
-      assert.deepEqual(getEncryptionClientConfig(),
-        { vaultUrl: "https://vault.example.com", interfaceUrl: "https://interface.example.com" });
+      assert.throws(() => getEncryptionClientConfig(), /"lasuite" encryption provider requires GRIST_ENCRYPTION_LASUITE_VAULT_URL/);
+      process.env.GRIST_ENCRYPTION_LASUITE_VAULT_URL = "https://vault.example.com";
+      process.env.GRIST_ENCRYPTION_LASUITE_INTERFACE_URL = "https://interface.example.com";
+      assert.deepEqual(getEncryptionClientConfig(), {
+        provider: { kind: "lasuite", vaultUrl: "https://vault.example.com", interfaceUrl: "https://interface.example.com" },
+      });
       process.env.GRIST_ENCRYPTION_MOCK_VAULT = "true";
       process.env.NODE_ENV = "development";
-      assert.deepEqual(getEncryptionClientConfig(), { mockVault: true });
+      assert.deepEqual(getEncryptionClientConfig(), { provider: { kind: "mock" } });
       process.env.NODE_ENV = "production";
       assert.throws(() => getEncryptionClientConfig(), /no security, and can't be used in production/);
+    });
+
+    it("takes the provider GRIST_ENCRYPTION_PROVIDER names, with its own settings", function() {
+      process.env.GRIST_ENCRYPTION_FEATURE_ENABLED = "true";
+      process.env.NODE_ENV = "development";
+      process.env.GRIST_ENCRYPTION_LASUITE_VAULT_URL = "https://vault.example.com";
+      process.env.GRIST_ENCRYPTION_LASUITE_INTERFACE_URL = "https://interface.example.com/";
+      // Named, it wins over the former setting.
+      process.env.GRIST_ENCRYPTION_MOCK_VAULT = "true";
+      process.env.GRIST_ENCRYPTION_PROVIDER = "lasuite";
+      assert.equal(getEncryptionClientConfig()?.provider.kind, "lasuite");
+      process.env.GRIST_ENCRYPTION_MOCK_VAULT = "false";
+      process.env.GRIST_ENCRYPTION_PROVIDER = "mock";
+      process.env.GRIST_ENCRYPTION_MOCK_KEY = "ab".repeat(32);
+      assert.deepEqual(getEncryptionClientConfig(), { provider: { kind: "mock", key: "ab".repeat(32) } });
+      process.env.GRIST_ENCRYPTION_MOCK_KEY = "not-hex";
+      assert.throws(() => getEncryptionClientConfig(), /GRIST_ENCRYPTION_MOCK_KEY must be 64 hex characters/);
+      process.env.GRIST_ENCRYPTION_PROVIDER = "other";
+      assert.throws(() => getEncryptionClientConfig(), /unknown provider "other" \(known: lasuite, mock\)/);
+      // The LaSuite service's settings are origins.
+      process.env.GRIST_ENCRYPTION_PROVIDER = "lasuite";
+      process.env.GRIST_ENCRYPTION_LASUITE_VAULT_URL = "https://vault.example.com/client.js";
+      assert.throws(() => getEncryptionClientConfig(), /GRIST_ENCRYPTION_LASUITE_VAULT_URL must be an origin/);
+    });
+
+    it("reads the LaSuite service's settings under their names, or their former ones", function() {
+      process.env.GRIST_ENCRYPTION_FEATURE_ENABLED = "true";
+      process.env.GRIST_ENCRYPTION_PROVIDER = "lasuite";
+      process.env.GRIST_ENCRYPTION_LASUITE_VAULT_URL = "https://vault.example.com";
+      process.env.GRIST_ENCRYPTION_LASUITE_INTERFACE_URL = "https://interface.example.com";
+      process.env.GRIST_ENCRYPTION_VAULT_URL = "https://former-vault.example.com";
+      assert.deepEqual(getEncryptionClientConfig()?.provider,
+        { kind: "lasuite", vaultUrl: "https://vault.example.com", interfaceUrl: "https://interface.example.com" });
+      delete process.env.GRIST_ENCRYPTION_LASUITE_VAULT_URL;
+      assert.equal((getEncryptionClientConfig()?.provider as { vaultUrl: string }).vaultUrl,
+        "https://former-vault.example.com");
+    });
+
+    it("identifies users to the provider as it knows them", function() {
+      const signedInWithOIDC = { id: 7, options: { authSubject: "sub-7" } };
+      const otherwise = { id: 8, options: {} };
+      process.env.GRIST_ENCRYPTION_FEATURE_ENABLED = "false";
+      assert.isNull(encryptionUserIdFor(signedInWithOIDC));
+      process.env.GRIST_ENCRYPTION_FEATURE_ENABLED = "true";
+      process.env.NODE_ENV = "development";
+      // The LaSuite service knows users by their OIDC subject only.
+      process.env.GRIST_ENCRYPTION_PROVIDER = "lasuite";
+      process.env.GRIST_ENCRYPTION_LASUITE_VAULT_URL = "https://vault.example.com";
+      process.env.GRIST_ENCRYPTION_LASUITE_INTERFACE_URL = "https://interface.example.com";
+      assert.equal(encryptionUserIdFor(signedInWithOIDC), "sub-7");
+      assert.isNull(encryptionUserIdFor(otherwise));
+      assert.isNull(encryptionUserIdFor(null));
+      // The stand-in knows everyone, whatever their sign-in.
+      process.env.GRIST_ENCRYPTION_PROVIDER = "mock";
+      assert.equal(encryptionUserIdFor(signedInWithOIDC), "sub-7");
+      assert.equal(encryptionUserIdFor(otherwise), "grist-user-8");
     });
 
     it("reads the AI service browsers may call for encrypted documents", function() {

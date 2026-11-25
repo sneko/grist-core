@@ -61,6 +61,7 @@ import {
 } from "app/common/encryption/LocalActiveDoc";
 import { addParsedTables, parseFileLocally } from "app/common/encryption/LocalImport";
 import { EncryptionClientConfig } from "app/common/gristUrls";
+import { pickDocLocale } from "app/common/Locales";
 import { User } from "app/common/User";
 
 import { Semaphore } from "async-mutex";
@@ -230,7 +231,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
         await promptKeySetup(vault, cancellation);
       }
       timings.step("check keys");
-      const vaultIdFor = makeVaultIdFor(config);
+      const vaultIdFor = makeVaultIdFor();
 
       const keyring = new Keyring(vault, () => relay.getKeys(), openResult);
       while (!keyring.canUseScope(DOC_SCOPE)) {
@@ -940,7 +941,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
       vaultIdFor: this._vaultIdFor,
       newDocSettings: (openResult.access === "owners") ? {
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-        locale: navigator.language || "en-US",
+        locale: pickDocLocale(navigator.languages?.length ? navigator.languages : [navigator.language]),
       } : undefined,
       onInvalidChange: change => this._onInvalidChange(change),
       onAccessGained: () => reportMessage(t("You were given access to more of this document."), {

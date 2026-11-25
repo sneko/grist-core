@@ -31,7 +31,7 @@ describe("EncryptedDocuments", function() {
   before(async function() {
     envSnapshot = new EnvironmentSnapshot();
     process.env.GRIST_ENCRYPTION_FEATURE_ENABLED = "true";
-    process.env.GRIST_ENCRYPTION_MOCK_VAULT = "true";
+    process.env.GRIST_ENCRYPTION_PROVIDER = "mock";
     await server.restart();
     owner = await gu.session().user("user1").teamSite.login();
     ownerApi = owner.createHomeApi();

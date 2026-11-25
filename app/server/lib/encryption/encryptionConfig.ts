@@ -1,12 +1,16 @@
 /**
- * Configuration of encrypted documents (named as for LaSuite Docs and Drive):
+ * Configuration of encrypted documents:
  *  - GRIST_ENCRYPTION_FEATURE_ENABLED: set to "true" to let users create encrypted documents.
- *  - GRIST_ENCRYPTION_VAULT_URL, GRIST_ENCRYPTION_INTERFACE_URL: the two origins of the LaSuite
- *    encryption service (the vault, which holds users' keys, and its interface), as for Docs'
- *    ENCRYPTION_VAULT_URL and ENCRYPTION_INTERFACE_URL.
- *  - GRIST_ENCRYPTION_MOCK_VAULT: set to "true" to use a stand-in for the encryption service, with a
- *    hardcoded key (GRIST_ENCRYPTION_MOCK_KEY, 64 hex characters, if set). Provides no security: for
- *    tests and development only, and refused when NODE_ENV is "production" (as in Grist's images).
+ *  - GRIST_ENCRYPTION_PROVIDER: who holds users' keys (see encryptionProviders.ts), with its own
+ *    settings:
+ *    - "lasuite", the LaSuite encryption service: GRIST_ENCRYPTION_LASUITE_VAULT_URL and
+ *      GRIST_ENCRYPTION_LASUITE_INTERFACE_URL, the origins of its vault (which holds users' keys) and
+ *      of its interface, as for LaSuite Docs' ENCRYPTION_VAULT_URL and ENCRYPTION_INTERFACE_URL
+ *      (GRIST_ENCRYPTION_VAULT_URL and GRIST_ENCRYPTION_INTERFACE_URL, their former names, still work);
+ *    - "mock", a stand-in with a hardcoded key (GRIST_ENCRYPTION_MOCK_KEY, 64 hex characters, if
+ *      set). Provides no security: for tests and development only, and refused when NODE_ENV is
+ *      "production" (as in Grist's images).
+ *    When unset: "mock" if GRIST_ENCRYPTION_MOCK_VAULT is "true" (its former setting), else "lasuite".
  *  - GRIST_ENCRYPTION_ALLOWED_WIDGETS: comma-separated URL prefixes of custom widgets that may be
  *    used in encrypted documents (they get to see the document's content). By default, only
  *    widgets served by Grist itself.
@@ -22,16 +26,19 @@
  */
 import { EncryptionAssistantConfig, EncryptionClientConfig } from "app/common/gristUrls";
 import { appSettings } from "app/server/lib/AppSettings";
-import log from "app/server/lib/log";
+import {
+  encryptionProviders, isEncryptionProviderKind, ProviderUser,
+} from "app/server/lib/encryption/encryptionProviders";
 
 const ENV_VARS = [
-  "GRIST_ENCRYPTION_FEATURE_ENABLED", "GRIST_ENCRYPTION_VAULT_URL", "GRIST_ENCRYPTION_INTERFACE_URL",
+  "GRIST_ENCRYPTION_FEATURE_ENABLED", "GRIST_ENCRYPTION_PROVIDER",
+  "GRIST_ENCRYPTION_LASUITE_VAULT_URL", "GRIST_ENCRYPTION_LASUITE_INTERFACE_URL",
+  "GRIST_ENCRYPTION_VAULT_URL", "GRIST_ENCRYPTION_INTERFACE_URL",
   "GRIST_ENCRYPTION_MOCK_VAULT", "GRIST_ENCRYPTION_MOCK_KEY", "GRIST_ENCRYPTION_ALLOWED_WIDGETS",
   "GRIST_ENCRYPTION_ASSISTANT", "NODE_ENV",
 ];
 
 let _cached: { key: string, result: EncryptionClientConfig | undefined } | undefined;
-let _warnedAboutMock = false;
 
 /**
  * The configuration browsers need, or undefined if encrypted documents aren't enabled. Throws if
@@ -48,6 +55,16 @@ export function getEncryptionClientConfig(): EncryptionClientConfig | undefined 
 
 export function isEncryptionEnabled(): boolean {
   return Boolean(getEncryptionClientConfig());
+}
+
+/**
+ * How the configured provider identifies a user, to give them keys (null if it can't, or if
+ * encrypted documents aren't enabled).
+ */
+export function encryptionUserIdFor(user: ProviderUser | null | undefined): string | null {
+  const config = getEncryptionClientConfig();
+  if (!config || !user) { return null; }
+  return encryptionProviders[config.provider.kind].userIdFor(user);
 }
 
 /** The most an encrypted document may take on the server, in bytes, if limited by configuration. */
@@ -79,28 +96,13 @@ function readEncryptionConfig(): EncryptionClientConfig | undefined {
     ...(assistant ? { assistant } : {}),
   };
   const mock = section.flag("mockVault").readBool({ envVar: "GRIST_ENCRYPTION_MOCK_VAULT", defaultValue: false });
-  const vaultUrl = section.flag("vaultUrl").readString({ envVar: "GRIST_ENCRYPTION_VAULT_URL" });
-  const interfaceUrl = section.flag("interfaceUrl").readString({ envVar: "GRIST_ENCRYPTION_INTERFACE_URL" });
-  if (mock) {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("GRIST_ENCRYPTION_MOCK_VAULT provides no security, and can't be used in production " +
-        "(NODE_ENV=production): set GRIST_ENCRYPTION_VAULT_URL and GRIST_ENCRYPTION_INTERFACE_URL instead");
-    }
-    if (!_warnedAboutMock) {
-      _warnedAboutMock = true;
-      log.warn("Encrypted documents use GRIST_ENCRYPTION_MOCK_VAULT: a hardcoded key, NOT secure (tests only)");
-    }
-    const mockKey = section.flag("mockKey").readString({ envVar: "GRIST_ENCRYPTION_MOCK_KEY" });
-    if (mockKey && !/^[0-9a-fA-F]{64}$/.test(mockKey)) {
-      throw new Error("GRIST_ENCRYPTION_MOCK_KEY must be 64 hex characters");
-    }
-    return { mockVault: true, ...(mockKey ? { mockKey } : {}), ...common };
+  const kind = section.flag("provider").readString({ envVar: "GRIST_ENCRYPTION_PROVIDER" }) ||
+    (mock ? "mock" : "lasuite");
+  if (!isEncryptionProviderKind(kind)) {
+    throw new Error(`GRIST_ENCRYPTION_PROVIDER: unknown provider "${kind}" ` +
+      `(known: ${Object.keys(encryptionProviders).join(", ")})`);
   }
-  if (!vaultUrl || !interfaceUrl) {
-    throw new Error("GRIST_ENCRYPTION_FEATURE_ENABLED requires GRIST_ENCRYPTION_VAULT_URL and " +
-      "GRIST_ENCRYPTION_INTERFACE_URL (or GRIST_ENCRYPTION_MOCK_VAULT for testing)");
-  }
-  return { vaultUrl, interfaceUrl, ...common };
+  return { provider: encryptionProviders[kind].readConfig(section), ...common };
 }
 
 function readAssistantConfig(setting: string | undefined): EncryptionAssistantConfig | undefined {

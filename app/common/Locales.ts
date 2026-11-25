@@ -38,6 +38,23 @@ try {
   locales = [...localeCodes].map(code => ({ name: code, code }));
 }
 
+/**
+ * The locale for a new document, from the browser's languages (navigator.languages), as the
+ * server picks it from Accept-Language for other documents (see localeFromRequest): the first
+ * `language-REGION` that Grist knows, else `fallback`. Anything else, such as `en-US@posix` (a
+ * POSIX locale modifier some browsers report, not a valid BCP 47 tag, which Intl refuses), is
+ * passed over: a document's locale goes to Intl when formatting numbers and dates.
+ */
+export function pickDocLocale(languages: readonly string[], fallback = "en-US"): string {
+  for (const language of languages) {
+    const match = /^([a-z]{2,3})[-_]([a-z]{2})$/i.exec(language);
+    if (!match) { continue; }
+    const code = `${match[1].toLowerCase()}-${match[2].toUpperCase()}`;
+    if (localeCodes.has(code)) { return code; }
+  }
+  return fallback;
+}
+
 export interface Currency {
   name: string;
   code: string;

@@ -40,7 +40,7 @@ import { DocLock, docLockedError, getDocLock, lockDoc, unlockDoc } from "app/ser
 import {
   EncryptedDocFile, EncryptedDocStorage, MAX_INLINE_BYTES, PayloadSource,
 } from "app/server/lib/encryption/EncryptedDocStorage";
-import { getMaxEncryptedDocSize } from "app/server/lib/encryption/encryptionConfig";
+import { encryptionUserIdFor, getMaxEncryptedDocSize } from "app/server/lib/encryption/encryptionConfig";
 import { EncryptionStore } from "app/server/lib/encryption/EncryptionStore";
 import { expressWrap } from "app/server/lib/expressWrap";
 import { getGoogleAuth } from "app/server/lib/GoogleAuth";
@@ -241,7 +241,7 @@ export class EncryptionRelay {
         email: fullUser?.email ?? null,
         name: fullUser?.name ?? null,
         ref: fullUser?.ref ?? null,
-        vaultUserId: user?.options?.authSubject ?? null,
+        vaultUserId: encryptionUserIdFor(user),
       },
     };
   }
@@ -875,13 +875,13 @@ export class EncryptionRelay {
   }
 
   /**
-   * How the signed-in user is known to the encryption service (their OIDC subject), e.g. to check
+   * How the signed-in user is known to the encryption provider (see encryptionProviders.ts), e.g. to check
    * they set up their keys before encrypting a document.
    */
   public async getIdentity(client: Client): Promise<{ userId: number, vaultUserId: string | null }> {
     const userId = this._requireUserId(client);
     const user = await this._dbManager.getUser(userId);
-    return { userId, vaultUserId: user?.options?.authSubject ?? null };
+    return { userId, vaultUserId: encryptionUserIdFor(user) };
   }
 
   /** Whether a document (encrypted or not) is locked, e.g. being converted to or from encryption. */
@@ -1084,7 +1084,7 @@ export class EncryptionRelay {
       email: u.email,
       name: u.name,
       access: getRealAccess(u, permissionData) || "",
-      vaultUserId: byId.get(u.id)?.options?.authSubject ?? null,
+      vaultUserId: encryptionUserIdFor(byId.get(u.id)),
     })).filter(m => m.access);
 
     // Key holders not listed may have lost access. The listing depends on who asks, so check

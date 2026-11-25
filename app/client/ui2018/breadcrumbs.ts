@@ -224,7 +224,7 @@ export function docBreadcrumbs(
       testId("encrypted-tag"),
     ) : null,
     // The stand-in for the encryption service (for tests and development) uses a known key.
-    (options.isEncrypted && getGristConfig().encryption?.mockVault) ? cssTag(t("INSECURE (mock)"),
+    (options.isEncrypted && getGristConfig().encryption?.provider.kind === "mock") ? cssTag(t("INSECURE (mock)"),
       tooltip({ title: t(`This server uses a stand-in for the encryption service, with a known key: documents aren't actually protected. For tests and development only.`) }),
       testId("encrypted-mock-tag"),
     ) : null,

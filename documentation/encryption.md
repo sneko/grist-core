@@ -1,26 +1,28 @@
 # Encrypted documents
 
 Encrypted documents are end-to-end encrypted: the server stores and relays them, but only ever
-sees ciphertext. Their keys are handled by the LaSuite encryption service (the same as Docs and
-Drive use), whose vault runs in an iframe of its own origin, so Grist itself never holds users'
-private keys.
+sees ciphertext. Users' keys are held by a key provider, outside of Grist's server: the first one
+is the LaSuite encryption service (the same as LaSuite Docs and Drive use), whose vault runs in an
+iframe of its own origin, so Grist itself never holds users' private keys. See "Key providers"
+below for what a provider does, and how to add one.
 
 ## Configuration
 
 | Variable | Meaning |
 |---|---|
 | `GRIST_ENCRYPTION_FEATURE_ENABLED` | `true` lets users create encrypted documents ("Add new" › "New encrypted document"). |
-| `GRIST_ENCRYPTION_VAULT_URL` | Origin of the encryption service's vault (its `client.js` is loaded from there). |
-| `GRIST_ENCRYPTION_INTERFACE_URL` | Origin of the encryption service's interface (onboarding, key backup...). |
-| `GRIST_ENCRYPTION_MOCK_VAULT` | `true` replaces the encryption service by a stand-in using a hardcoded key. **No security at all: for tests and development only**, refused when `NODE_ENV=production` (as in Grist's images). |
-| `GRIST_ENCRYPTION_MOCK_KEY` | With the mock vault, the hardcoded key (64 hex characters; a default is used otherwise). |
+| `GRIST_ENCRYPTION_PROVIDER` | The key provider: `lasuite` (the default) or `mock`. Each has its settings below. |
+| `GRIST_ENCRYPTION_LASUITE_VAULT_URL` | `lasuite`: origin of the encryption service's vault (its `client.js` is loaded from there). Formerly `GRIST_ENCRYPTION_VAULT_URL`, still accepted. |
+| `GRIST_ENCRYPTION_LASUITE_INTERFACE_URL` | `lasuite`: origin of the encryption service's interface (onboarding, key backup...). Formerly `GRIST_ENCRYPTION_INTERFACE_URL`, still accepted. |
+| `GRIST_ENCRYPTION_MOCK_KEY` | `mock`: the hardcoded key (64 hex characters; a default is used otherwise). The `mock` provider is a stand-in using it for everyone. **No security at all: for tests and development only**, refused when `NODE_ENV=production` (as in Grist's images). |
+| `GRIST_ENCRYPTION_MOCK_VAULT` | Former setting of the `mock` provider: `true` selects it when `GRIST_ENCRYPTION_PROVIDER` is unset. |
 | `GRIST_ENCRYPTION_ALLOWED_WIDGETS` | Comma-separated URL prefixes of custom widgets allowed in encrypted documents (e.g. `https://widgets.example.com/`), besides those Grist serves itself. Widgets see the content of the documents they're in. |
 | `GRIST_ENCRYPTION_MAX_DOC_SIZE_MB` | The most an encrypted document may take on the server, when the site's plan sets no limit (plans' data and attachments limits apply together, since the server can't tell them apart). |
 | `GRIST_ENCRYPTION_ASSISTANT` | An AI service for the formula assistant of encrypted documents, which browsers call directly, as JSON: `{"endpoint": "https://…/v1/chat/completions", "model": "…", "provider": "…", "sovereign": true, "auth": "user-key"}` (an OpenAI-compatible endpoint allowing calls from browsers; `auth` is `user-key` for users to give their own API key, kept in their browser, or `none`). |
 
 The configuration is checked on startup: mistakes stop the server rather than break pages.
 
-Users are identified to the encryption service by their OIDC subject (`sub`), which Grist links
+With the `lasuite` provider, users are identified to the encryption service by their OIDC subject (`sub`), which Grist links
 to the user on their first OIDC sign-in (for all OIDC sign-ins, not only for encrypted documents;
 a user already linked to another subject, e.g. from another identity provider, keeps it). As for Docs and Drive, the encryption service and Grist
 must share the identity provider (an `encryption` client in the same realm): see
@@ -28,6 +30,60 @@ must share the identity provider (an `encryption` client in the same realm): see
 
 A document is encrypted from its creation (`options.encryption = {version: 1}`), or converted
 later by an owner (see below).
+
+## Key providers
+
+A provider holds users' keys and does the cryptography with them; Grist stores and relays what it
+wraps. The rest of the encryption code (collaboration, private columns, key replacement, forms,
+suggestions...) only relies on its contract, so a provider can be replaced without touching it.
+
+**The contract** is `IKeyVault` (`app/common/encryption/EncryptionCrypto.ts`), in the browser:
+
+- `hasKeys()`, and optionally `openOnboarding()` / `openSettings()`: whether the user can use
+  encryption on this device, and the provider's own setup and settings (shown by Grist when needed);
+- `getRegisteredUsers(ids)`: which members can be given keys (those who set up encryption);
+- `createDocumentKey(recipients)` / `shareDocumentKey(myKey, recipients)`: a new document key, or
+  the caller's copy of an existing one, wrapped for each recipient (opaque bytes and a key version,
+  stored by the server in `doc_encryption_key_wraps`, and handed back to that member only);
+- `encrypt(data, myKey)` / `decrypt(data, myKey)`: with the caller's copy of a key;
+- `encryptWithNewKey()` / `decryptWithNestedKey()`: attachments, each with a key of its own,
+  wrapped with the document's.
+
+The server needs little of a provider (`app/server/lib/encryption/encryptionProviders.ts`): its
+settings, read and checked at startup and handed to browsers, and how it identifies a Grist user
+(`userIdFor()`, the `vaultUserId` browsers wrap keys for).
+
+**Adding a provider**: its settings in `EncryptionProviderConfig` (`app/common/gristUrls.ts`), its
+server side in `encryptionProviders.ts`, its vault in `app/client/encryption/providers/` (created in
+`makeKeyVault()`, `app/client/encryption/keyVaults.ts`), each with its tests. The `lasuite`
+provider is tested against a stand-in for the service's SDK (`test/client/encryption/lasuiteProvider.ts`);
+the end-to-end tests run with the `mock` one.
+
+**The providers:**
+
+- `lasuite`: the LaSuite encryption service ([suitenumerique/encryption](https://github.com/suitenumerique/encryption)).
+  Each user has their own key pair in its vault (a browser iframe of its own origin), with its
+  recovery phrase, device transfer, recovery team and emergency access; users are known by their
+  OIDC subject, so Grist and the service share the identity provider.
+- `mock`: a stand-in, with one hardcoded key for everyone, for tests and development.
+
+**What other kinds of providers would need.** Nothing more from the storage: a member's copy of
+a document key is opaque to Grist (bytes and a version), so it can be whatever the provider makes
+of it, and the rows of `doc_encryption_key_wraps` remain the access list (the server hands a copy
+to its member only, and a member removed loses theirs, the document key being replaced on the next
+change). For instance:
+
+- services where each member has keys of their own, e.g. SDKs for application developers, wrap the
+  document key for each member, as `lasuite` does;
+- key access services, which hold an organisation's key and unwrap a document key for whoever the
+  application vouches for (the pattern of Google Workspace's client-side encryption, with its key
+  access control list services, or of OpenTDF's key access service), would give every member the
+  same copy, wrapped with the organisation's key (its version as `key_version`). Since a former
+  member may have kept that copy, the service must check that the user is still a member, from a
+  statement of their access the server signs, not only who they are. Grist's server still never
+  gets the document key, but the service, and whoever runs it, can: it's not end-to-end in the same
+  sense, and should be presented as such;
+- services that keep the wrapped keys themselves would give each member a reference to their record.
 
 ## Architecture
 
@@ -351,8 +407,9 @@ What works differently:
   (e.g. downloads, or backups outside of Grist) aren't.
 - Volatile formulas (`NOW()`, `TODAY()`...) aren't refreshed when a document is opened, only when
   something they depend on changes.
-- Only the mock vault is tested end to end automatically. The real encryption service is
-  integrated (`keyVaults.ts`); `docker/encryption-dev/` has a setup to try it.
+- Only the `mock` provider is tested end to end automatically. The `lasuite` provider is tested
+  against a stand-in for the service's SDK (`test/client/encryption/lasuiteProvider.ts`), and was
+  run end to end with the real service by hand; `docker/encryption-dev/` has a setup to try it.
 
 ## Tests
 
@@ -369,4 +426,6 @@ What works differently:
   transfers by parts, size limits, key changes with their snapshot (and undoing them if they
   didn't make it to the history), restoring, locks, suggestions, forms and their inbox, and
   converting documents to and from encryption (including interrupted conversions).
-- `test/nbrowser/EncryptedDocuments.ts`: end to end in the browser (with the mock vault).
+- `test/nbrowser/EncryptedDocuments.ts`: end to end in the browser (with the `mock` provider).
+- `test/client/encryption/lasuiteProvider.ts`: the `lasuite` provider against a stand-in for the
+  LaSuite service's SDK (how Grist's calls translate to the service's).
