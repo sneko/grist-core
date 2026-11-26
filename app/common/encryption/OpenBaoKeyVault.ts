@@ -11,7 +11,7 @@
  *   they can unwrap with it. OpenBao's policy (openBaoPolicy() below) enforces all of it, so a copy
  *   is of no use to anyone else, and nobody can create or tamper with someone else's key.
  * - Users sign in to OpenBao with the identity provider Grist uses: OpenBao runs the OIDC sign-in
- *   itself (as a confidential client), in a tab of its own, and gives the browser a token. Grist's
+ *   itself (as a confidential client), in a window of its own (a pop-up), and gives the browser a token. Grist's
  *   server never gets it, nor the document keys.
  * - Content is encrypted in the page with the document keys (see LocalCryptoKeyVault).
  *
@@ -105,7 +105,7 @@ export class OpenBaoClient {
 }
 
 /**
- * Starts a sign-in to OpenBao: the URL of the identity provider to open in a tab, the `state` the
+ * Starts a sign-in to OpenBao: the URL of the identity provider to open in a window, the `state` the
  * tab will come back with, and a secret the caller keeps to finish it (OpenBao refuses the
  * callback without it, so a code that leaks from the tab is of no use).
  */

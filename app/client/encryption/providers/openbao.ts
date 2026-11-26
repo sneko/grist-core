@@ -3,7 +3,7 @@
  * app/common/encryption/OpenBaoKeyVault.ts for the keys themselves, and ./openbaoSessions.ts for
  * where sign-ins are kept).
  *
- * Signing in opens a tab (from the user's click, as browsers require), where OpenBao runs the OIDC
+ * Signing in opens a small window, a pop-up (from the user's click, as browsers require), where OpenBao runs the OIDC
  * sign-in with the identity provider Grist uses: when the user is still signed in there, the tab
  * closes at once; otherwise it shows the provider's form. It comes back to a page of Grist
  * (OPENBAO_CALLBACK_PATH), which hands what it came back with to this page, which finishes the
@@ -80,7 +80,7 @@ export function createOpenBaoKeyVault(config: OpenBaoEncryptionProviderConfig, v
   };
 
   const signIn = async (): Promise<boolean> => {
-    // First, synchronously, within the click: a tab opened after an await would be blocked.
+    // First, synchronously, within the click: a window opened after an await would be blocked.
     const tab = browser.openTab();
     if (!tab) {
       throw new Error("The browser blocked the window for signing in to the key service: allow pop-ups " +

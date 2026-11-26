@@ -199,11 +199,12 @@ GRIST_OIDC_IDP_CLIENT_SECRET=grist-dev-secret \
 GRIST_ENCRYPTION_FEATURE_ENABLED=true \
 GRIST_ENCRYPTION_PROVIDER=openbao \
 GRIST_ENCRYPTION_OPENBAO_URL=http://127.0.0.1:7320 \
+GRIST_IN_SERVICE=true \
 yarn start
 ```
 
-Sign in as `alice`, create an encrypted document, and "Enable encryption": a tab opens and closes
-at once (Alice is signed in at Keycloak), and the document opens. Share it with
+Sign in as `alice`, create an encrypted document, and "Enable encryption": a small window opens
+and closes at once (Alice is signed in at Keycloak), and the document opens. Share it with
 `bob@example.com`, accept him when the notice says so, and he reads it after his own "Enable
 encryption". In OpenBao (`docker exec -e BAO_ADDR=http://127.0.0.1:7320 -e BAO_TOKEN=dev-root
 grist_encryption_dev_openbao bao list transit/keys`), the users' keys are `grist-user-<sub>`;
@@ -211,6 +212,10 @@ grist_encryption_dev_openbao bao list transit/keys`), the users' keys are `grist
 
 On macOS, Docker Desktop's host networking must be turned on (Settings › Resources › Network),
 or OpenBao doesn't reach Keycloak.
+
+In a VM (e.g. Lima) with the browser on the host, the browser calls OpenBao too: start it with
+`OPENBAO_LISTEN=0.0.0.0 docker compose --profile openbao up -d --wait` (it only listens inside
+the VM otherwise), and Grist with `GRIST_HOST=0.0.0.0`, as above.
 
 ## How Docs and Drive do it (for reference)
 

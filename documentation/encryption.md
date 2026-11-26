@@ -95,9 +95,9 @@ devices. Signing in is enough.
   versions still unwrap (until `min_decryption_version` says otherwise), new ones use the latest
   version. OpenBao's `rewrap` can bring older copies to it without revealing the keys; Grist doesn't
   do it by itself.
-- **Signing in**: the first time in a browser (with "Enable encryption"), a tab opens where OpenBao
-  runs the OIDC sign-in itself, as a confidential client of the identity provider Grist uses: when
-  the user is signed in there, the tab closes at once; otherwise it shows the provider's form. It
+- **Signing in**: the first time in a browser (with "Enable encryption"), a small window (a
+  pop-up) opens where OpenBao runs the OIDC sign-in itself, as a confidential client of the
+  identity provider Grist uses: when the user is signed in there, the window closes at once; otherwise it shows the provider's form. It
   comes back to `/encryption/openbao-callback` on Grist's origin, which hands the result to the
   page, both directly and over a `BroadcastChannel` (identity providers sending
   `Cross-Origin-Opener-Policy: same-origin` sever the tab from the page); the page only takes its
