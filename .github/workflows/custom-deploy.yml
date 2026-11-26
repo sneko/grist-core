@@ -1,0 +1,97 @@
+name: Custom deploy
+run-name: Image of ${{ inputs.branch }}
+
+# Builds a branch into an image of Grist (as upstream's grist-oss, amd64) for the suite's
+# preview environments, pushed to this repository's packages, ghcr.io/<owner>/grist-oss (the
+# name the suite's chart gives Grist's image), with the job's own token: no secret to set up.
+# The tag is the branch's name, for a preview's label: `grist:ghcr.io/<owner>/*:<branch>` (or
+# `grist:ghcr.io/<owner>/grist-oss:<branch>`); and `sha-<8 chars>` of the commit built, for a
+# preview to pin.
+#
+# It lives on a branch of its own (custom-deploy), apart from the branches meant for
+# upstream, which is the fork's default branch: GitHub offers "Run workflow" only for the
+# workflows of the default branch. Run by hand only.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to build (its name is the image's tag)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.branch }}
+  cancel-in-progress: true
+
+env:
+  BRANCH: ${{ inputs.branch }}
+  IMAGE: ghcr.io/${{ github.repository_owner }}/grist-oss
+
+jobs:
+  build:
+    name: Build and push
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Free some space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /usr/share/swift
+
+      - name: Check out the branch to build
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          persist-credentials: false
+
+      - name: Compute the tags
+        id: meta
+        run: |
+          # A tag: letters, digits, `_`, `.` and `-` (not first), up to 128 characters.
+          tag="${BRANCH//[^A-Za-z0-9._-]/-}"
+          tag="${tag#[.-]}"
+          tag="${tag:0:128}"
+          sha="$(git rev-parse --short=8 HEAD)"
+          echo "primary=${IMAGE}:${tag}" >> "$GITHUB_OUTPUT"
+          echo "tags=${IMAGE}:${tag},${IMAGE}:sha-${sha}" >> "$GITHUB_OUTPUT"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      # grist-oss bundles no ext/, but the `ext=ext` build context needs one (as upstream does).
+      - name: Add an empty ext/ directory
+        run: mkdir -p ext && touch ext/dummy
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-contexts: ext=ext
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          build-args: |
+            GRIST_ALLOW_AUTOMATIC_VERSION_CHECKING=false
+          cache-from: type=gha,scope=custom-deploy
+          cache-to: type=gha,scope=custom-deploy,mode=max
+
+      - name: Say how to use it
+        run: |
+          {
+            echo "Pushed \`${{ steps.meta.outputs.primary }}\` (\`${BRANCH}\` at ${{ steps.meta.outputs.sha }})."
+            echo
+            echo "Label for a preview of the suite: \`grist:${{ steps.meta.outputs.primary }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
