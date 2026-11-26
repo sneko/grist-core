@@ -7,6 +7,8 @@
  *      GRIST_ENCRYPTION_LASUITE_INTERFACE_URL, the origins of its vault (which holds users' keys) and
  *      of its interface, as for LaSuite Docs' ENCRYPTION_VAULT_URL and ENCRYPTION_INTERFACE_URL
  *      (GRIST_ENCRYPTION_VAULT_URL and GRIST_ENCRYPTION_INTERFACE_URL, their former names, still work);
+ *    - "openbao", OpenBao or HashiCorp Vault (see encryptionProviders.ts): GRIST_ENCRYPTION_OPENBAO_URL,
+ *      and optionally GRIST_ENCRYPTION_OPENBAO_AUTH_MOUNT, _ROLE, _TRANSIT_MOUNT and _KEY_PREFIX;
  *    - "mock", a stand-in with a hardcoded key (GRIST_ENCRYPTION_MOCK_KEY, 64 hex characters, if
  *      set). Provides no security: for tests and development only, and refused when NODE_ENV is
  *      "production" (as in Grist's images).
@@ -25,15 +27,23 @@
  * reported then, rather than on each page.
  */
 import { EncryptionAssistantConfig, EncryptionClientConfig } from "app/common/gristUrls";
+import { isAffirmative } from "app/common/gutil";
+import { GETGRIST_COM_PROVIDER_KEY, OIDC_PROVIDER_KEY } from "app/common/loginProviders";
 import { appSettings } from "app/server/lib/AppSettings";
 import {
   encryptionProviders, isEncryptionProviderKind, ProviderUser,
 } from "app/server/lib/encryption/encryptionProviders";
+import { getActiveLoginSystemType } from "app/server/lib/loginSystemHelpers";
+
+import * as express from "express";
 
 const ENV_VARS = [
   "GRIST_ENCRYPTION_FEATURE_ENABLED", "GRIST_ENCRYPTION_PROVIDER",
   "GRIST_ENCRYPTION_LASUITE_VAULT_URL", "GRIST_ENCRYPTION_LASUITE_INTERFACE_URL",
   "GRIST_ENCRYPTION_VAULT_URL", "GRIST_ENCRYPTION_INTERFACE_URL",
+  "GRIST_ENCRYPTION_OPENBAO_URL", "GRIST_ENCRYPTION_OPENBAO_AUTH_MOUNT", "GRIST_ENCRYPTION_OPENBAO_ROLE",
+  "GRIST_ENCRYPTION_OPENBAO_TRANSIT_MOUNT", "GRIST_ENCRYPTION_OPENBAO_KEY_PREFIX", "GRIST_OIDC_IDP_ISSUER",
+  "GRIST_LOGIN_SYSTEM_TYPE", "GRIST_TEST_LOGIN", "GRIST_GETGRISTCOM_SECRET",
   "GRIST_ENCRYPTION_MOCK_VAULT", "GRIST_ENCRYPTION_MOCK_KEY", "GRIST_ENCRYPTION_ALLOWED_WIDGETS",
   "GRIST_ENCRYPTION_ASSISTANT", "NODE_ENV",
 ];
@@ -102,7 +112,38 @@ function readEncryptionConfig(): EncryptionClientConfig | undefined {
     throw new Error(`GRIST_ENCRYPTION_PROVIDER: unknown provider "${kind}" ` +
       `(known: ${Object.keys(encryptionProviders).join(", ")})`);
   }
-  return { provider: encryptionProviders[kind].readConfig(section), ...common };
+  const provider = encryptionProviders[kind];
+  const config = provider.readConfig(section);
+  if (provider.requiresOidc && !isOidcTheLoginSystem()) {
+    throw new Error(`The "${kind}" encryption provider requires users to sign in with OIDC ` +
+      "(GRIST_OIDC_IDP_ISSUER and the other GRIST_OIDC_* settings, and no other login system: " +
+      "GRIST_LOGIN_SYSTEM_TYPE unset or \"oidc\", no GRIST_TEST_LOGIN, and when unset, no " +
+      "GRIST_GETGRISTCOM_SECRET): it knows them by their OIDC subject");
+  }
+  return { provider: config, ...common };
+}
+
+/** Serves the configured provider's own pages, if any (e.g. where a sign-in to it comes back). */
+export function addEncryptionProviderEndpoints(app: express.Application) {
+  const config = getEncryptionClientConfig();
+  if (config) { encryptionProviders[config.provider.kind].addEndpoints?.(app); }
+}
+
+// Whether users sign in with OIDC: configured, and not replaced by another login system.
+function isOidcTheLoginSystem() {
+  if (isAffirmative(process.env.GRIST_TEST_LOGIN)) { return false; }
+  const type = getActiveLoginSystemType(appSettings);
+  if (type && type !== OIDC_PROVIDER_KEY) { return false; }
+  // (Unless another one is chosen, getgrist.com's sign-in comes first when configured.)
+  if (!type && isGetGristComConfigured()) { return false; }
+  return Boolean(appSettings.section("login").section("system").section(OIDC_PROVIDER_KEY)
+    .flag("issuer").readString({ envVar: "GRIST_OIDC_IDP_ISSUER" }));
+}
+
+// (As GetGristComConfig.ts reads it, which can't be imported here: it would make a cycle.)
+function isGetGristComConfigured() {
+  return Boolean(appSettings.section("login").section("system").section(GETGRIST_COM_PROVIDER_KEY)
+    .flag("secret").readString({ envVar: "GRIST_GETGRISTCOM_SECRET", censor: true }));
 }
 
 function readAssistantConfig(setting: string | undefined): EncryptionAssistantConfig | undefined {

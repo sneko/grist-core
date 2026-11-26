@@ -1,4 +1,5 @@
 import { kbJumperAnchor } from "app/client/components/RegionFocusSwitcher";
+import { forgetEncryptionProviderSessions } from "app/client/encryption/providers/signOut";
 import { makeT } from "app/client/lib/localization";
 import { getLoginOrSignupUrl, getLoginUrl, getLogoutUrl, getSignupUrl } from "app/client/lib/urlUtils";
 import { AppModel } from "app/client/models/AppModel";
@@ -190,7 +191,9 @@ export class AccountWidget extends Disposable {
         isExternal ? null : menuItemLink({ href: getLoginUrl() }, t("Add account"), testId("dm-add-account")),
       ],
 
-      menuItemLink({ href: getLogoutUrl() }, t("Sign out"), testId("dm-log-out")),
+      // (Signing out of Grist also signs out of the encryption key provider, if any kept a sign-in here.)
+      menuItemLink({ href: getLogoutUrl() }, t("Sign out"), testId("dm-log-out"),
+        dom.on("click", () => forgetEncryptionProviderSessions())),
 
       maybeAddSiteSwitcherSection(this._appModel),
     ];

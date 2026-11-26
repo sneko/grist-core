@@ -1403,6 +1403,8 @@ export class LocalActiveDoc {
     const keyId = makeKeyId(scope);
     const myVaultId = recipients.find(r => r.userId === this._userId)?.vaultUserId;
     const myWrap = myVaultId ? wraps.get(myVaultId) : undefined;
+    // (A key nobody here could read would make what gets encrypted with it unreadable.)
+    if (myVaultId && !myWrap) { throw new Error("The key service didn't make your own copy of the new key"); }
     const request: NewKeyRequest = {
       scope,
       keyId,

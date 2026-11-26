@@ -55,7 +55,7 @@ import {
 } from "app/server/lib/DocWorkerIdentity";
 import { DocWorkerLoadTracker, getDocWorkerLoadTracker } from "app/server/lib/DocWorkerLoadTracker";
 import { DocWorkerInfo, IDocWorkerMap } from "app/server/lib/DocWorkerMap";
-import { isEncryptionEnabled } from "app/server/lib/encryption/encryptionConfig";
+import { addEncryptionProviderEndpoints, isEncryptionEnabled } from "app/server/lib/encryption/encryptionConfig";
 import { EncryptionConversion } from "app/server/lib/encryption/EncryptionConversion";
 import { EncryptionRelay } from "app/server/lib/encryption/EncryptionRelay";
 import { addEncryptionEngineEndpoints } from "app/server/lib/encryption/engineAssets";
@@ -903,6 +903,7 @@ export class FlexServer implements GristServer {
     // checks the encryption settings, so that mistakes are reported on startup.)
     if (isEncryptionEnabled()) {
       addEncryptionEngineEndpoints(this.app);
+      addEncryptionProviderEndpoints(this.app);
     }
     // If there is a static ext directory, serve material from there as well.
     // This is used to run Grist with full edition extensions downloaded at

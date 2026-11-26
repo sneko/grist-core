@@ -80,6 +80,36 @@
         "email"
       ],
       "optionalClientScopes": []
+    },
+    {
+      "clientId": "openbao",
+      "name": "OpenBao (the \"openbao\" key provider)",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "openbao-dev-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "http://localhost:8484/encryption/openbao-callback"
+      ],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "defaultClientScopes": [
+        "web-origins",
+        "basic",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "offline_access"
+      ]
     }
   ],
   "users": [

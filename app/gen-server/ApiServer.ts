@@ -23,7 +23,7 @@ import { Permissions } from "app/gen-server/lib/Permissions";
 import { appSettings } from "app/server/lib/AppSettings";
 import { getAuthorizedUserId, getUserId, getUserProfiles, RequestWithLogin } from "app/server/lib/Authorizer";
 import { getSessionUser, linkOrgWithEmail } from "app/server/lib/BrowserSession";
-import { isEncryptionEnabled } from "app/server/lib/encryption/encryptionConfig";
+import { encryptionUserIdFor, isEncryptionEnabled } from "app/server/lib/encryption/encryptionConfig";
 import { expressWrap } from "app/server/lib/expressWrap";
 import { RequestWithOrg } from "app/server/lib/extractOrg";
 import { GristServer } from "app/server/lib/GristServer";
@@ -471,8 +471,8 @@ export class ApiServer {
       }
       const result: AccountInfo = { ...fullUser, personalSite: await this._getPersonalSiteUsage(req) };
       if (isEncryptionEnabled()) {
-        const user = await this._dbManager.getUser(fullUser.id);
-        if (user?.options?.authSubject) { result.encryptionUserId = user.options.authSubject; }
+        const encryptionUserId = encryptionUserIdFor(await this._dbManager.getUser(fullUser.id));
+        if (encryptionUserId) { result.encryptionUserId = encryptionUserId; }
       }
       return sendOkReply(req, res, result, { allowedFields: new Set(["allowGoogleLogin"]) });
     }));

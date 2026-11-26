@@ -11,9 +11,14 @@ below for what a provider does, and how to add one.
 | Variable | Meaning |
 |---|---|
 | `GRIST_ENCRYPTION_FEATURE_ENABLED` | `true` lets users create encrypted documents ("Add new" › "New encrypted document"). |
-| `GRIST_ENCRYPTION_PROVIDER` | The key provider: `lasuite` (the default) or `mock`. Each has its settings below. |
+| `GRIST_ENCRYPTION_PROVIDER` | The key provider: `lasuite` (the default), `openbao` or `mock` (see "Key providers"). Each has its settings below. `lasuite` and `openbao` require users to sign in with OIDC (`GRIST_OIDC_IDP_ISSUER`..., and no other login system chosen or coming first, such as getgrist.com's): the server refuses to start otherwise. |
 | `GRIST_ENCRYPTION_LASUITE_VAULT_URL` | `lasuite`: origin of the encryption service's vault (its `client.js` is loaded from there). Formerly `GRIST_ENCRYPTION_VAULT_URL`, still accepted. |
 | `GRIST_ENCRYPTION_LASUITE_INTERFACE_URL` | `lasuite`: origin of the encryption service's interface (onboarding, key backup...). Formerly `GRIST_ENCRYPTION_INTERFACE_URL`, still accepted. |
+| `GRIST_ENCRYPTION_OPENBAO_URL` | `openbao`: OpenBao's (or Vault's) origin, e.g. `https://openbao.example.com`. |
+| `GRIST_ENCRYPTION_OPENBAO_AUTH_MOUNT` | `openbao`: where its OIDC auth method is mounted, under `auth/` (default `oidc`). |
+| `GRIST_ENCRYPTION_OPENBAO_ROLE` | `openbao`: the OIDC role users sign in with (default `grist`). |
+| `GRIST_ENCRYPTION_OPENBAO_TRANSIT_MOUNT` | `openbao`: where its transit secrets engine is mounted (default `transit`). |
+| `GRIST_ENCRYPTION_OPENBAO_KEY_PREFIX` | `openbao`: users' keys are named `<prefix><OIDC subject>` (default `grist-user-`). Not empty: the policy opens every key it names to all users, so it must only name Grist's. |
 | `GRIST_ENCRYPTION_MOCK_KEY` | `mock`: the hardcoded key (64 hex characters; a default is used otherwise). The `mock` provider is a stand-in using it for everyone. **No security at all: for tests and development only**, refused when `NODE_ENV=production` (as in Grist's images). |
 | `GRIST_ENCRYPTION_MOCK_VAULT` | Former setting of the `mock` provider: `true` selects it when `GRIST_ENCRYPTION_PROVIDER` is unset. |
 | `GRIST_ENCRYPTION_ALLOWED_WIDGETS` | Comma-separated URL prefixes of custom widgets allowed in encrypted documents (e.g. `https://widgets.example.com/`), besides those Grist serves itself. Widgets see the content of the documents they're in. |
@@ -65,7 +70,162 @@ the end-to-end tests run with the `mock` one.
   Each user has their own key pair in its vault (a browser iframe of its own origin), with its
   recovery phrase, device transfer, recovery team and emergency access; users are known by their
   OIDC subject, so Grist and the service share the identity provider.
+- `openbao`: [OpenBao](https://openbao.org) (MPL-2.0), or HashiCorp Vault, whose API it shares,
+  with a key for each user in its transit secrets engine (see below).
 - `mock`: a stand-in, with one hardcoded key for everyone, for tests and development.
+
+### The `openbao` provider
+
+A simpler alternative to the LaSuite service, with an open source key management server many
+organizations already run: users have no keys of their own to set up, back up or move between
+devices. Signing in is enough.
+
+- **Each user has a key in OpenBao**, created by themselves when they first sign in (only of the
+  plain `aes256-gcm96` kind), named `<prefix><OIDC subject>`. Nobody else can create it, nor
+  change it (but OpenBao's operators).
+- **Each member's copy of a document key is the key encrypted by OpenBao with that member's key**
+  (`transit/encrypt/<prefix><OIDC subject>`): OpenBao's ciphertext, `vault:v<version>:…`, stored
+  as usual in `doc_encryption_key_wraps` (its version also as `key_version`, for information:
+  OpenBao reads it from the ciphertext). Anyone signed in may wrap a key for anyone who has a key
+  (so who signed in once: the others can't be given keys yet, as with the LaSuite service), giving
+  nothing but the key to wrap; **a user may only unwrap with their own key**, so a copy is of no
+  use to anyone else. The policy (`openBaoPolicy()`, `app/common/encryption/OpenBaoKeyVault.ts`)
+  enforces all of it.
+- **Keys can be rotated in OpenBao** (`transit/keys/<name>/rotate`): copies made with older
+  versions still unwrap (until `min_decryption_version` says otherwise), new ones use the latest
+  version. OpenBao's `rewrap` can bring older copies to it without revealing the keys; Grist doesn't
+  do it by itself.
+- **Signing in**: the first time in a browser (with "Enable encryption"), a tab opens where OpenBao
+  runs the OIDC sign-in itself, as a confidential client of the identity provider Grist uses: when
+  the user is signed in there, the tab closes at once; otherwise it shows the provider's form. It
+  comes back to `/encryption/openbao-callback` on Grist's origin, which hands the result to the
+  page, both directly and over a `BroadcastChannel` (identity providers sending
+  `Cross-Origin-Opener-Policy: same-origin` sever the tab from the page); the page only takes its
+  own sign-in's result (by its `state`), and finishes it with OpenBao (with a secret it kept, so
+  that a code leaking from the tab is of no use). A hidden iframe couldn't do it silently: browsers
+  withhold the identity provider's cookies there.
+- **The token** is kept in the browser (`localStorage`, for the next pages and other tabs, which
+  read it again at each use), renewed when it nears its expiry (also while a document stays open
+  without calling OpenBao), and forgotten and revoked when the user signs out of Grist from its
+  menu. Tokens left in the browser by another user are revoked when the next one opens an
+  encrypted document. A token for another user than the one signed in to Grist is refused and
+  revoked (the role must map the `sub` claim to `subject`).
+- **Wrapping a key for a member OpenBao refuses** skips that member only when their key doesn't
+  exist (they never signed in to OpenBao); any other refusal (a revoked token, a policy that
+  doesn't match the settings) fails the operation, and a new key is never recorded without the
+  user's own copy.
+- **Content is encrypted in the page**, with AES-GCM under the document key (see
+  `LocalCryptoKeyVault`, `app/common/encryption/EncryptionCrypto.ts`): document keys are in the
+  page's memory while documents are open, where the LaSuite service keeps them in its vault's
+  iframe.
+
+**What it protects against, and what not.** Grist's server, its administrators, its database,
+storage and backups only get ciphertext and wrapped keys, and the server has no token to have
+them unwrapped: it can't read documents. These can:
+
+- OpenBao's operators (they can use any user's key);
+- **the identity provider's administrators**, who can sign in to OpenBao as anyone, unlike with
+  the LaSuite service (where reading also needs the user's own keys); in a self-hosted
+  installation, often the same people as Grist's administrators;
+- a Grist server modified to serve pages that take the token or the document keys, or a script
+  injected in Grist's pages (XSS), since the token and the keys are in the page (the LaSuite
+  service keeps keys in an iframe of its own origin against that);
+- anyone with the user's browser while the token is valid (a shared computer where the user didn't
+  sign out of Grist from its menu, e.g. whose Grist session just expired): keep `token_ttl` short
+  (the setup below: an hour, renewed up to 12 hours). Renewing doesn't ask the identity provider
+  again: a user disabled there keeps their token until `token_max_ttl` (see "Running it", below).
+
+Anyone signed in to OpenBao may wrap a key of their choosing for anyone (a server with an
+account at the identity provider included), but that's of no use to give members a key someone
+else knows: browsers only use keys members recorded, and check that their copy is of the key
+recorded (see "What members record").
+
+**Limits.**
+
+- Subjects must be unique ignoring case: OpenBao matches users' aliases ignoring it, while keys'
+  names keep it (two users `Alice` and `alice` would share an entity, and the second could
+  unwrap with the first one's key). Keycloak's subjects (lowercase UUIDs) are.
+- Anyone signed in can tell whether a given subject has a key, and since when (it's how Grist
+  knows who can be given keys), not list them.
+- Any call a user may make can have its answer kept by OpenBao for them (response wrapping), up
+  to the size of a request, for as long as they ask, even after their token is revoked: OpenBao
+  can only cap that by requiring wrapping. Bound it with the listener's `max_request_size` (Grist
+  sends less than 1 KB), and rate limits (see "Running it").
+
+- OpenBao names keys with letters, digits, `_`, and `.` or `-` inside, only: users whose OIDC subject has
+  other characters (Keycloak users federated from LDAP, `f:…:…`; Auth0's `auth0|…`; email
+  addresses) can't use encrypted documents with it, and are told so.
+- The subject must be the same for Grist's and OpenBao's clients of the identity provider: not
+  with "pairwise" subjects, different for each client. And it must be the same identity provider:
+  OpenBao's `oidc_discovery_url` the issuer of `GRIST_OIDC_IDP_ISSUER` (subjects are only unique
+  for an issuer).
+- The policy names users' keys after their subject in its paths, where OpenBao reads `*` and `+`
+  as wildcards: neither can be in a key's name, so subjects with them are refused, but the
+  identity provider must not give them to users either (Keycloak's are UUIDs).
+- Every origin users reach Grist at (team sites on subdomains, custom domains) needs its callback
+  in the role's `allowed_redirect_uris` and at the identity provider, and CORS for it; tokens are
+  kept for each origin. Grist served under a path prefix isn't supported for the callback.
+
+**Setting OpenBao up** (as `test/server/lib/encryption/OpenBaoProvider.ts` and
+`docker/encryption-dev/openbao-setup.sh` do), for the default mounts and key names
+(`openBaoPolicy()` makes the policy for others):
+
+```bash
+bao secrets enable transit
+bao auth enable oidc
+# A client of the identity provider Grist uses (confidential: OpenBao keeps its secret). Its
+# redirect URIs at the identity provider: Grist's callback(s) below.
+bao write auth/oidc/config oidc_discovery_url=https://idp.example.com/realms/x \
+  oidc_client_id=openbao oidc_client_secret=... default_role=grist
+ACCESSOR=$(bao read -field=accessor sys/auth/oidc)
+bao policy write grist - <<POLICY
+path "transit/keys/grist-user-{{identity.entity.aliases.$ACCESSOR.name}}" { capabilities = ["create", "read", "update"] allowed_parameters = { "type" = ["aes256-gcm96"] } }
+path "transit/keys/grist-user-*" { capabilities = ["read"] }
+path "transit/encrypt/grist-user-*" { capabilities = ["update"] allowed_parameters = { "plaintext" = [] } }
+path "transit/decrypt/grist-user-{{identity.entity.aliases.$ACCESSOR.name}}" { capabilities = ["update"] allowed_parameters = { "ciphertext" = [] } }
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self" { capabilities = ["update"] }
+path "auth/token/revoke-self" { capabilities = ["update"] }
+POLICY
+# Users are named by their OIDC subject (`sub`), also given to Grist as `subject` (required). They
+# get the `grist` policy only, not OpenBao's `default` one (which would let them store data here).
+bao write auth/oidc/role/grist role_type=oidc user_claim=sub bound_audiences=openbao \
+  allowed_redirect_uris=https://grist.example.com/encryption/openbao-callback \
+  claim_mappings=sub=subject oidc_scopes=openid token_policies=grist \
+  token_no_default_policy=true token_type=service token_ttl=1h token_max_ttl=12h
+# Browsers call OpenBao from Grist's pages.
+bao write sys/config/cors enabled=true allowed_origins=https://grist.example.com \
+  allowed_headers=X-Vault-Token,Content-Type
+```
+
+Then `GRIST_ENCRYPTION_PROVIDER=openbao` and `GRIST_ENCRYPTION_OPENBAO_URL=https://openbao.example.com`,
+with Grist signing users in with OIDC at the same identity provider. Removing a user's key (with
+`deletion_allowed`), or raising its `min_decryption_version`, makes their copies unusable.
+
+**Running it.**
+
+- **An OpenBao (or a namespace, and an OIDC auth method) of its own**: CORS is set for the whole
+  instance, the policy's globs open every key of the transit mount named with the prefix, and
+  users choose their role when signing in: any other role of the same auth method without
+  `bound_claims` would give them its policies too. Recreating the auth method changes its
+  accessor: write the policy again.
+- **Who may use it**: anyone with an account at the identity provider can sign in to OpenBao,
+  create their key and call it. To keep it to Grist's users, add `bound_claims` to the role (e.g.
+  a group: `bound_claims='{"groups":["grist"]}' groups_claim=groups`).
+- **Limits on use**: rate limit quotas, e.g. `bao write sys/quotas/rate-limit/grist-transit
+  path=transit/ rate=50 interval=1s` and the same for `auth/oidc/`, sized for your users; a small
+  `max_request_size` on the listener (e.g. 65536).
+- **Losing OpenBao loses the documents**: their keys can't be unwrapped without users' keys. Back
+  it up (e.g. Raft snapshots), with its unseal keys, before anything else.
+- **Audit**: an audit device, with its defaults (which hash what's sent and returned, so
+  document keys), never `log_raw`.
+- **Rotation** is the operators' (users can't rotate their own key): `transit/keys/<name>/rotate`,
+  or `auto_rotate_period` on users' keys. Older copies keep working: don't raise
+  `min_decryption_version` (Grist doesn't rewrap copies).
+- **When a user leaves**: disable their entity (`identity/entity/id/<id> disabled=true`), which
+  stops their tokens at once; otherwise they keep working until `token_max_ttl` (keep it near
+  Grist's session length). Then remove them from documents in Grist, which replaces the keys
+  they had.
 
 **What other kinds of providers would need.** Nothing more from the storage: a member's copy of
 a document key is opaque to Grist (bytes and a version), so it can be whatever the provider makes
@@ -407,9 +567,11 @@ What works differently:
   (e.g. downloads, or backups outside of Grist) aren't.
 - Volatile formulas (`NOW()`, `TODAY()`...) aren't refreshed when a document is opened, only when
   something they depend on changes.
-- Only the `mock` provider is tested end to end automatically. The `lasuite` provider is tested
-  against a stand-in for the service's SDK (`test/client/encryption/lasuiteProvider.ts`), and was
-  run end to end with the real service by hand; `docker/encryption-dev/` has a setup to try it.
+- Only the `mock` provider is tested end to end in the browser automatically. The `openbao`
+  provider is tested against a real OpenBao, without Grist's pages
+  (`test/server/lib/encryption/OpenBaoProvider.ts`); the `lasuite` provider against a stand-in for
+  the service's SDK (`test/client/encryption/lasuiteProvider.ts`). Both were run end to end by
+  hand; `docker/encryption-dev/` has a setup to try either.
 
 ## Tests
 
@@ -429,3 +591,15 @@ What works differently:
 - `test/nbrowser/EncryptedDocuments.ts`: end to end in the browser (with the `mock` provider).
 - `test/client/encryption/lasuiteProvider.ts`: the `lasuite` provider against a stand-in for the
   LaSuite service's SDK (how Grist's calls translate to the service's).
+- `test/server/lib/encryption/OpenBaoProvider.ts`: the `openbao` provider against a real OpenBao
+  and an identity provider of the test's own: signing in (the browser part, with a stand-in tab
+  following the redirects, including one the identity provider severs), each member's copy only
+  they can unwrap, keys nobody else can create or tamper with, sharing, rotation, attachments,
+  renewed, expired and revoked tokens, signing out, other mounts. Only run with
+  `TEST_OPENBAO=docker` (OpenBao started in Docker, on the host's network; `TEST_OPENBAO_IMAGE`
+  for another image) or `TEST_OPENBAO_URL` and `TEST_OPENBAO_TOKEN` (a throwaway OpenBao, which
+  the test sets up and leaves so), as the CI does; the policy's consistency with this
+  documentation and the callback page are checked always.
+- `test/client/encryption/openbaoProvider.ts`: the parts of the `openbao` provider that need no
+  OpenBao (against made-up answers): which members are skipped when wrapping keys, sign-ins kept
+  alongside other tabs, renewed, forgotten and revoked, the sign-in's tab and messages.

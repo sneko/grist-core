@@ -1077,15 +1077,28 @@ export interface EncryptionClientConfig {
  *  - "lasuite": the LaSuite encryption service (https://github.com/suitenumerique/encryption),
  *    the one LaSuite Docs and Drive use, whose vault holds users' keys in an iframe of its own
  *    origin;
+ *  - "openbao": OpenBao (or HashiCorp Vault), with a key for each user in its transit secrets
+ *    engine, users signing in to it with the identity provider Grist uses (see
+ *    app/common/encryption/OpenBaoKeyVault.ts);
  *  - "mock": a stand-in with a hardcoded key, for tests and development only (no security).
  */
-export type EncryptionProviderConfig = LaSuiteEncryptionProviderConfig | MockEncryptionProviderConfig;
+export type EncryptionProviderConfig =
+  LaSuiteEncryptionProviderConfig | OpenBaoEncryptionProviderConfig | MockEncryptionProviderConfig;
 
 export interface LaSuiteEncryptionProviderConfig {
   kind: "lasuite";
   // Origins of the service's vault (its client.js is loaded from there) and of its interface.
   vaultUrl: string;
   interfaceUrl: string;
+}
+
+export interface OpenBaoEncryptionProviderConfig {
+  kind: "openbao";
+  url: string;            // OpenBao's origin, e.g. https://openbao.example.com
+  authMount: string;      // Where its OIDC auth method is mounted (default "oidc").
+  role: string;           // The OIDC role users sign in with (default "grist").
+  transitMount: string;   // Where its transit secrets engine is mounted (default "transit").
+  keyPrefix: string;      // Users' keys are named <keyPrefix><OIDC subject> (default "grist-user-").
 }
 
 export interface MockEncryptionProviderConfig {

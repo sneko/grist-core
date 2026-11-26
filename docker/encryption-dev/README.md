@@ -1,11 +1,13 @@
 # Encrypted documents: local dev setup
 
-Two ways to try Grist's encrypted documents (see `documentation/encryption.md`) on your machine:
+Three ways to try Grist's encrypted documents (see `documentation/encryption.md`) on your machine:
 
-- **(a) Mock vault**: no encryption service, no identity provider. Fast, but no security at all
+- **Mock vault**: no encryption service, no identity provider. Fast, but no security at all
   (a hardcoded key). Good for working on Grist's side.
-- **(b) Real encryption service**: Grist and the [LaSuite encryption service](https://github.com/suitenumerique/encryption)
+- **LaSuite encryption service**: Grist and the [LaSuite encryption service](https://github.com/suitenumerique/encryption)
   share the Keycloak of this directory, as Docs and Drive share theirs with it.
+- **OpenBao**: the `openbao` key provider, with an [OpenBao](https://openbao.org) of this
+  directory signing users in at its Keycloak (Linux: it runs on the host's network).
 
 ## Ports
 
@@ -13,6 +15,7 @@ Two ways to try Grist's encrypted documents (see `documentation/encryption.md`) 
 |------|------|------------|
 | 8484 | Grist (`yarn start`) | grist-core |
 | 7310 | Keycloak, realm `grist` (admin console: `admin` / `admin`) | this directory |
+| 7320 | OpenBao (dev mode, root token `dev-root`), for the OpenBao test | this directory (`--profile openbao`) |
 | 7200 | Encryption service: vault `http://data.encryption.localhost:7200`, interface `http://encryption.localhost:7200` | encryption repo |
 | 7205 | Encryption service's PostgreSQL | encryption repo |
 | 7207 / 7208 | Encryption service's Maildev (web / SMTP), where its emails land | encryption repo |
@@ -33,7 +36,7 @@ Realm `grist`, all with password `password`:
 Subjects are fixed in `realm-export.json`, so they survive a `docker compose down -v`: Grist and
 the encryption service both remember users by their subject.
 
-## (a) Quick test with the mock vault
+## Quick test with the mock vault
 
 No Keycloak needed. Grist's test login lets you sign in as anyone (any email, no password):
 
@@ -61,7 +64,7 @@ it): it exercises the whole flow (document keys, column keys, rotation) but prot
 If Grist redirects every page to `/boot` (a fresh home database is "not in service" until set up),
 add `GRIST_IN_SERVICE=true`, or sign in at `/boot` with the boot key printed in the server logs.
 
-## (b) Test with the real encryption service
+## Test with the LaSuite encryption service
 
 Grist identifies users to the encryption service by their OIDC subject (`sub`), which it links
 to the user (`users.options.authSubject`) on their first sign-in through OIDC. Users who existed
@@ -169,6 +172,45 @@ profile, so don't switch users within one profile.
 
 Emails sent by the encryption service (security alerts, emergency access) are in its Maildev:
 `http://localhost:7207`.
+
+## Test with OpenBao
+
+The `openbao` provider (`documentation/encryption.md`, "The openbao provider"): each user has a
+key in OpenBao, the document key is wrapped with each member's, and users sign in to OpenBao with
+this directory's Keycloak (client `openbao`, confidential, its secret kept by OpenBao). No key to
+set up, back up or move between devices.
+
+```bash
+cd docker/encryption-dev
+# Keycloak, and OpenBao on the host's network (to reach Keycloak at http://localhost:7310, the
+# issuer the browser and Grist use too). A Keycloak started before the `openbao` client was added
+# to realm-export.json needs `--force-recreate` (the realm is imported at first start only).
+docker compose --profile openbao up -d --wait
+# Transit engine, OIDC sign-in at Keycloak, users' policy, CORS for Grist (again after a restart:
+# OpenBao's dev mode keeps nothing).
+./openbao-setup.sh
+cd ../..
+
+APP_HOME_URL=http://localhost:8484 \
+GRIST_OIDC_SP_HOST=http://localhost:8484 \
+GRIST_OIDC_IDP_ISSUER=http://localhost:7310/realms/grist \
+GRIST_OIDC_IDP_CLIENT_ID=grist \
+GRIST_OIDC_IDP_CLIENT_SECRET=grist-dev-secret \
+GRIST_ENCRYPTION_FEATURE_ENABLED=true \
+GRIST_ENCRYPTION_PROVIDER=openbao \
+GRIST_ENCRYPTION_OPENBAO_URL=http://127.0.0.1:7320 \
+yarn start
+```
+
+Sign in as `alice`, create an encrypted document, and "Enable encryption": a tab opens and closes
+at once (Alice is signed in at Keycloak), and the document opens. Share it with
+`bob@example.com`, accept him when the notice says so, and he reads it after his own "Enable
+encryption". In OpenBao (`docker exec -e BAO_ADDR=http://127.0.0.1:7320 -e BAO_TOKEN=dev-root
+grist_encryption_dev_openbao bao list transit/keys`), the users' keys are `grist-user-<sub>`;
+`bao write -f transit/keys/grist-user-<sub>/rotate` rotates one, and the documents still open.
+
+On macOS, Docker Desktop's host networking must be turned on (Settings › Resources › Network),
+or OpenBao doesn't reach Keycloak.
 
 ## How Docs and Drive do it (for reference)
 

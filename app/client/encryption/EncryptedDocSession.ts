@@ -16,7 +16,7 @@
  */
 import { Comm } from "app/client/components/Comm";
 import {
-  copyDocument, decryptDocument, makeFormAnswerHelpers, makeVaultIdFor, ProgressCallback,
+  copyDocument, decryptDocument, makeFormAnswerHelpers, ProgressCallback, vaultIdOf,
 } from "app/client/encryption/DocConversion";
 import { downloadFromDrive, driveFileIdFromUrl } from "app/client/encryption/driveImport";
 import { getKeyVault } from "app/client/encryption/keyVaults";
@@ -231,7 +231,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
         await promptKeySetup(vault, cancellation);
       }
       timings.step("check keys");
-      const vaultIdFor = makeVaultIdFor();
+      const vaultIdFor = vaultIdOf;
 
       const keyring = new Keyring(vault, () => relay.getKeys(), openResult);
       while (!keyring.canUseScope(DOC_SCOPE)) {

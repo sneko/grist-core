@@ -110,7 +110,11 @@ describe("encryption/EncryptionRelay", function() {
 
   describe("configuration", function() {
     let env: testUtils.EnvironmentSnapshot;
-    beforeEach(() => { env = new testUtils.EnvironmentSnapshot(); });
+    beforeEach(() => {
+      env = new testUtils.EnvironmentSnapshot();
+      // (Real providers know users by their OIDC subject: Grist must sign them in with OIDC.)
+      process.env.GRIST_OIDC_IDP_ISSUER = "https://idp.example.com";
+    });
     afterEach(() => { env.restore(); });
 
     it("uses the encryption service, or a stand-in outside of production", function() {
@@ -147,7 +151,7 @@ describe("encryption/EncryptionRelay", function() {
       process.env.GRIST_ENCRYPTION_MOCK_KEY = "not-hex";
       assert.throws(() => getEncryptionClientConfig(), /GRIST_ENCRYPTION_MOCK_KEY must be 64 hex characters/);
       process.env.GRIST_ENCRYPTION_PROVIDER = "other";
-      assert.throws(() => getEncryptionClientConfig(), /unknown provider "other" \(known: lasuite, mock\)/);
+      assert.throws(() => getEncryptionClientConfig(), /unknown provider "other" \(known: lasuite, openbao, mock\)/);
       // The LaSuite service's settings are origins.
       process.env.GRIST_ENCRYPTION_PROVIDER = "lasuite";
       process.env.GRIST_ENCRYPTION_LASUITE_VAULT_URL = "https://vault.example.com/client.js";
@@ -165,6 +169,72 @@ describe("encryption/EncryptionRelay", function() {
       delete process.env.GRIST_ENCRYPTION_LASUITE_VAULT_URL;
       assert.equal((getEncryptionClientConfig()?.provider as { vaultUrl: string }).vaultUrl,
         "https://former-vault.example.com");
+    });
+
+    it("requires users to sign in with OIDC for providers that know them by their subject", function() {
+      process.env.GRIST_ENCRYPTION_FEATURE_ENABLED = "true";
+      process.env.NODE_ENV = "development";
+      process.env.GRIST_ENCRYPTION_LASUITE_VAULT_URL = "https://vault.example.com";
+      process.env.GRIST_ENCRYPTION_LASUITE_INTERFACE_URL = "https://interface.example.com";
+      process.env.GRIST_ENCRYPTION_OPENBAO_URL = "https://openbao.example.com";
+      delete process.env.GRIST_OIDC_IDP_ISSUER;
+      for (const provider of ["lasuite", "openbao"]) {
+        process.env.GRIST_ENCRYPTION_PROVIDER = provider;
+        assert.throws(() => getEncryptionClientConfig(),
+          new RegExp(`"${provider}" encryption provider requires users to sign in with OIDC`));
+      }
+      // The stand-in doesn't: tests sign users in otherwise.
+      process.env.GRIST_ENCRYPTION_PROVIDER = "mock";
+      assert.equal(getEncryptionClientConfig()?.provider.kind, "mock");
+      process.env.GRIST_OIDC_IDP_ISSUER = "https://idp.example.com";
+      process.env.GRIST_ENCRYPTION_PROVIDER = "openbao";
+      assert.equal(getEncryptionClientConfig()?.provider.kind, "openbao");
+      // Configured, but not how users sign in: another login system, or the test login.
+      process.env.GRIST_LOGIN_SYSTEM_TYPE = "saml";
+      assert.throws(() => getEncryptionClientConfig(), /requires users to sign in with OIDC/);
+      process.env.GRIST_LOGIN_SYSTEM_TYPE = "oidc";
+      assert.equal(getEncryptionClientConfig()?.provider.kind, "openbao");
+      // Signing in with getgrist.com comes first, unless OIDC is chosen.
+      process.env.GRIST_GETGRISTCOM_SECRET = "secret";
+      assert.equal(getEncryptionClientConfig()?.provider.kind, "openbao");
+      delete process.env.GRIST_LOGIN_SYSTEM_TYPE;
+      assert.throws(() => getEncryptionClientConfig(), /requires users to sign in with OIDC/);
+      delete process.env.GRIST_GETGRISTCOM_SECRET;
+      assert.equal(getEncryptionClientConfig()?.provider.kind, "openbao");
+      process.env.GRIST_TEST_LOGIN = "1";
+      assert.throws(() => getEncryptionClientConfig(), /requires users to sign in with OIDC/);
+    });
+
+    it("reads OpenBao's settings, with defaults for its mounts, role and key names", function() {
+      process.env.GRIST_ENCRYPTION_FEATURE_ENABLED = "true";
+      process.env.GRIST_ENCRYPTION_PROVIDER = "openbao";
+      assert.throws(() => getEncryptionClientConfig(), /"openbao" encryption provider requires GRIST_ENCRYPTION_OPENBAO_URL/);
+      process.env.GRIST_ENCRYPTION_OPENBAO_URL = "https://openbao.example.com/";
+      assert.deepEqual(getEncryptionClientConfig()?.provider, {
+        kind: "openbao", url: "https://openbao.example.com", authMount: "oidc", role: "grist",
+        transitMount: "transit", keyPrefix: "grist-user-",
+      });
+      process.env.GRIST_ENCRYPTION_OPENBAO_AUTH_MOUNT = "sso";
+      process.env.GRIST_ENCRYPTION_OPENBAO_ROLE = "grist-docs";
+      process.env.GRIST_ENCRYPTION_OPENBAO_TRANSIT_MOUNT = "kms/transit";
+      process.env.GRIST_ENCRYPTION_OPENBAO_KEY_PREFIX = "docs.";
+      assert.deepEqual(getEncryptionClientConfig()?.provider, {
+        kind: "openbao", url: "https://openbao.example.com", authMount: "sso", role: "grist-docs",
+        transitMount: "kms/transit", keyPrefix: "docs.",
+      });
+      process.env.GRIST_ENCRYPTION_OPENBAO_ROLE = "a role";
+      assert.throws(() => getEncryptionClientConfig(), /GRIST_ENCRYPTION_OPENBAO_ROLE: "a role" is not a valid name/);
+      process.env.GRIST_ENCRYPTION_OPENBAO_ROLE = "grist";
+      // (Keys must be named apart from others in the same engine: the policy opens those it names.)
+      process.env.GRIST_ENCRYPTION_OPENBAO_KEY_PREFIX = "";
+      assert.throws(() => getEncryptionClientConfig(), /GRIST_ENCRYPTION_OPENBAO_KEY_PREFIX: "" is not a valid name/);
+      process.env.GRIST_ENCRYPTION_OPENBAO_KEY_PREFIX = "-docs";
+      assert.throws(() => getEncryptionClientConfig(), /GRIST_ENCRYPTION_OPENBAO_KEY_PREFIX: "-docs" is not a valid name/);
+      process.env.GRIST_ENCRYPTION_OPENBAO_KEY_PREFIX = "grist-user-";
+      process.env.GRIST_ENCRYPTION_OPENBAO_TRANSIT_MOUNT = "t";
+      assert.equal((getEncryptionClientConfig()?.provider as any).transitMount, "t");
+      process.env.GRIST_ENCRYPTION_OPENBAO_URL = "https://openbao.example.com/v1";
+      assert.throws(() => getEncryptionClientConfig(), /GRIST_ENCRYPTION_OPENBAO_URL must be an origin/);
     });
 
     it("identifies users to the provider as it knows them", function() {
@@ -204,6 +274,12 @@ describe("encryption/EncryptionRelay", function() {
         process.env.GRIST_ENCRYPTION_ASSISTANT = value;
         assert.throws(() => getEncryptionClientConfig(), error);
       }
+    });
+
+    it("gives the account page the id the provider knows the user by", async function() {
+      // (The stand-in knows users without an OIDC subject by their Grist id.)
+      const profile = await owner.getUserProfile();
+      assert.equal(profile.encryptionUserId, `grist-user-${profile.id}`);
     });
 
     it("refuses encrypted documents when they're not enabled", async function() {

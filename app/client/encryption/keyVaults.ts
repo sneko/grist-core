@@ -10,6 +10,7 @@
  */
 import { createLaSuiteKeyVault } from "app/client/encryption/providers/lasuite";
 import { createMockKeyVault } from "app/client/encryption/providers/mock";
+import { createOpenBaoKeyVault } from "app/client/encryption/providers/openbao";
 import { gristThemeObs } from "app/client/ui2018/theme";
 import { IKeyVault } from "app/common/encryption/EncryptionCrypto";
 import { EncryptionClientConfig, EncryptionProviderConfig } from "app/common/gristUrls";
@@ -37,6 +38,7 @@ function makeKeyVault(provider: EncryptionProviderConfig, vaultUserId: string | 
       current: interfaceTheme(gristThemeObs().get()),
       onChange: listener => gristThemeObs().addListener(theme => listener(interfaceTheme(theme))),
     });
+    case "openbao": return createOpenBaoKeyVault(provider, vaultUserId);
     case "mock": return createMockKeyVault(provider);
     default: {
       // (A provider the server knows but this client doesn't: a mismatch between them.)

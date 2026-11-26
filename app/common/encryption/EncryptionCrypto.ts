@@ -63,43 +63,26 @@ export function makeDocCipher(vault: IKeyVault, myKey: WrappedKey): IDocCipher {
 }
 
 /**
- * A stand-in for the encryption service, for tests and local development. It exercises all the
- * code paths of a real vault (keys per user, missing keys, encryption of all content), without
- * any of its security: each document key is random, but "wrapped" for users with a hardcoded key
- * (so anyone knowing it can unwrap any key), and labelled with the user it's for.
+ * A vault that does the cryptography in the page, with document keys it gets unwrapped (by the
+ * provider, e.g. a key management service): subclasses only say how a key is wrapped for each
+ * recipient, and unwrapped for the caller. Content is encrypted with AES-GCM under the document key;
+ * attachments get keys of their own, encrypted with the document key.
+ *
+ * Unlike the LaSuite service's vault (an iframe of its own origin), document keys are then in the
+ * page's memory while documents are open.
  */
-export class MockKeyVault implements IKeyVault {
-  // 256-bit AES key, hex-encoded. Deliberately public: this vault provides no security.
-  public static readonly DEFAULT_KEY_HEX = "4772697374453245452d6d6f636b2d6b65792d666f722d74657374732d6f6e6c";
-
-  private _masterKey: Promise<CryptoKey>;
-  private _isRegistered: (vaultUserId: string) => boolean;
-  private _hasKeys: () => boolean;
+export abstract class LocalCryptoKeyVault implements IKeyVault {
   private _keys = new Map<string, Promise<CryptoKey>>();
 
-  constructor(options: {
-    keyHex?: string,
-    // Users considered registered with the (mock) encryption service; all of them if omitted.
-    registeredUsers?: (vaultUserId: string) => boolean,
-    hasKeys?: () => boolean,
-  } = {}) {
-    this._masterKey = importAesKey(hexToBytes(options.keyHex || MockKeyVault.DEFAULT_KEY_HEX));
-    this._isRegistered = options.registeredUsers || (() => true);
-    this._hasKeys = options.hasKeys || (() => true);
-  }
-
-  public async hasKeys() { return this._hasKeys(); }
-
-  public async getRegisteredUsers(vaultUserIds: string[]) {
-    return new Set(vaultUserIds.filter(id => this._isRegistered(id)));
-  }
+  public abstract hasKeys(): Promise<boolean>;
+  public abstract getRegisteredUsers(vaultUserIds: string[]): Promise<Set<string>>;
 
   public async createDocumentKey(recipients: KeyRecipient[]) {
-    return this._wrapFor(crypto.getRandomValues(new Uint8Array(32)), recipients);
+    return this.wrapFor(crypto.getRandomValues(new Uint8Array(32)), recipients);
   }
 
   public async shareDocumentKey(myKey: WrappedKey, recipients: KeyRecipient[]) {
-    return this._wrapFor(await this._unwrap(myKey), recipients);
+    return this.wrapFor(await this.unwrap(myKey), recipients);
   }
 
   public async encrypt(data: Uint8Array, myKey: WrappedKey): Promise<Uint8Array> {
@@ -123,7 +106,58 @@ export class MockKeyVault implements IKeyVault {
     return aesDecrypt(await importAesKey(rawKey), ciphertext);
   }
 
-  private async _wrapFor(rawKey: Uint8Array, recipients: KeyRecipient[]) {
+  /** The key (32 random bytes) wrapped for each recipient who can be given it, by vaultUserId. */
+  protected abstract wrapFor(rawKey: Uint8Array, recipients: KeyRecipient[]): Promise<Map<string, WrappedKey>>;
+
+  /** The caller's copy of a key, unwrapped. */
+  protected abstract unwrap(myKey: WrappedKey): Promise<Uint8Array>;
+
+  // (Each copy is unwrapped once, as long as it unwraps.)
+  private _getKey(myKey: WrappedKey): Promise<CryptoKey> {
+    const id = `${myKey.keyVersion}:${bytesToBase64(myKey.wrappedKey)}`;
+    let key = this._keys.get(id);
+    if (!key) {
+      key = this.unwrap(myKey).then(importAesKey);
+      key.catch(() => this._keys.delete(id));
+      this._keys.set(id, key);
+    }
+    return key;
+  }
+}
+
+/**
+ * A stand-in for the encryption service, for tests and local development. It exercises all the
+ * code paths of a real vault (keys per user, missing keys, encryption of all content), without
+ * any of its security: each document key is random, but "wrapped" for users with a hardcoded key
+ * (so anyone knowing it can unwrap any key), and labelled with the user it's for.
+ */
+export class MockKeyVault extends LocalCryptoKeyVault {
+  // 256-bit AES key, hex-encoded. Deliberately public: this vault provides no security.
+  public static readonly DEFAULT_KEY_HEX = "4772697374453245452d6d6f636b2d6b65792d666f722d74657374732d6f6e6c";
+
+  private _masterKey: Promise<CryptoKey>;
+  private _isRegistered: (vaultUserId: string) => boolean;
+  private _hasKeys: () => boolean;
+
+  constructor(options: {
+    keyHex?: string,
+    // Users considered registered with the (mock) encryption service; all of them if omitted.
+    registeredUsers?: (vaultUserId: string) => boolean,
+    hasKeys?: () => boolean,
+  } = {}) {
+    super();
+    this._masterKey = importAesKey(hexToBytes(options.keyHex || MockKeyVault.DEFAULT_KEY_HEX));
+    this._isRegistered = options.registeredUsers || (() => true);
+    this._hasKeys = options.hasKeys || (() => true);
+  }
+
+  public async hasKeys() { return this._hasKeys(); }
+
+  public async getRegisteredUsers(vaultUserIds: string[]) {
+    return new Set(vaultUserIds.filter(id => this._isRegistered(id)));
+  }
+
+  protected async wrapFor(rawKey: Uint8Array, recipients: KeyRecipient[]) {
     const wrapped = bytesToBase64(await aesEncrypt(await this._masterKey, rawKey));
     const result = new Map<string, WrappedKey>();
     for (const r of recipients) {
@@ -133,21 +167,10 @@ export class MockKeyVault implements IKeyVault {
     return result;
   }
 
-  private async _unwrap(myKey: WrappedKey): Promise<Uint8Array> {
+  protected async unwrap(myKey: WrappedKey): Promise<Uint8Array> {
     const match = /^mock-wrap:.*:([A-Za-z0-9+/=]+)$/.exec(utf8Decode(myKey.wrappedKey));
     if (!match) { throw new Error("MockKeyVault: not a key wrapped by this vault"); }
     return aesDecrypt(await this._masterKey, base64ToBytes(match[1]));
-  }
-
-  private _getKey(myKey: WrappedKey): Promise<CryptoKey> {
-    const id = utf8Decode(myKey.wrappedKey);
-    let key = this._keys.get(id);
-    if (!key) {
-      key = this._unwrap(myKey).then(importAesKey);
-      key.catch(() => this._keys.delete(id));
-      this._keys.set(id, key);
-    }
-    return key;
   }
 }
 

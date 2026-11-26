@@ -1,12 +1,12 @@
 #
-# Local identity provider to try Grist's encrypted documents with the LaSuite encryption service.
-# See README.md in this directory.
+# Local services to try Grist's encrypted documents with a real key provider (see README.md in
+# this directory): a Keycloak, as the identity provider of Grist and of the provider, and an
+# OpenBao, for the "openbao" provider (see its definition below).
 #
-# Ports: Keycloak on 7310 (the encryption repo uses 7200-7209, Docs/Drive's Keycloak uses 8083,
-# Grist uses 8484).
+# Ports: Keycloak on 7310, OpenBao on 7320 (the encryption repo uses 7200-7209, Docs/Drive's
+# Keycloak uses 8083, Grist uses 8484).
 #
-# Keycloak runs in dev mode with its embedded database: nothing to persist, the realm is
-# imported from realm-export.json on first start. `docker compose down` resets everything.
+# Both run in dev mode, in memory: nothing to persist. `docker compose down` resets everything.
 #
 
 name: grist-encryption-dev
@@ -43,3 +43,21 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+  openbao:
+    container_name: grist_encryption_dev_openbao
+    profiles: [openbao]
+    image: openbao/openbao:2.7.2
+    security_opt:
+      - no-new-privileges:true
+    command: server -dev
+    network_mode: host
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: dev-root
+      BAO_DEV_LISTEN_ADDRESS: 127.0.0.1:7320
+    # (So that `up --wait` returns once it answers, for openbao-setup.sh.)
+    healthcheck:
+      test: ["CMD", "bao", "status", "-address=http://127.0.0.1:7320"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    restart: unless-stopped
