@@ -23,7 +23,7 @@
  * Used in browsers (app/client/encryption/providers/openbao.ts) and in Node tests alike.
  */
 import {
-  base64ToBytes, bytesToBase64, KeyRecipient, LocalCryptoKeyVault, utf8Decode, utf8Encode, WrappedKey,
+  base64ToBytes, bytesToBase64, KeyRecipient, KeySetupKind, LocalCryptoKeyVault, utf8Decode, utf8Encode, WrappedKey,
 } from "app/common/encryption/EncryptionCrypto";
 import { OpenBaoEncryptionProviderConfig } from "app/common/gristUrls";
 
@@ -73,6 +73,13 @@ export interface OpenBaoSession {
 
 export class OpenBaoError extends Error {
   constructor(message: string, public readonly status?: number) { super(message); }
+}
+
+/** No sign-in to OpenBao (any longer): none kept, or one expired or revoked. */
+export class NotSignedInToOpenBaoError extends Error {
+  constructor() {
+    super("Not signed in to the key service (or the sign-in expired): reload the page to sign in again");
+  }
 }
 
 /** Calls OpenBao's HTTP API. */
@@ -170,6 +177,9 @@ export class OpenBaoKeyVault extends LocalCryptoKeyVault {
     session: () => OpenBaoSession | null,
     saveSession: (session: OpenBaoSession) => void,
     forgetSession: (session: OpenBaoSession) => void,
+    // Whether the user signed in to OpenBao before (in this browser), and how to remember it.
+    signedInBefore?: () => boolean,
+    rememberSignedIn?: () => void,
     // Signs in to OpenBao (in the browser, through a tab): resolves with whether it was done.
     signIn?: () => Promise<boolean>,
   }) {
@@ -182,9 +192,22 @@ export class OpenBaoKeyVault extends LocalCryptoKeyVault {
    * then made sure to exist (created on their first sign-in).
    */
   public async hasKeys() {
-    if (!await this._freshSession()) { return false; }
-    await this._ensureOwnKey();
-    return true;
+    try {
+      await this._ensureOwnKey();
+      this._options.rememberSignedIn?.();
+      return true;
+    } catch (e) {
+      if (e instanceof NotSignedInToOpenBaoError) { return false; }
+      throw e;
+    }
+  }
+
+  /**
+   * OpenBao keeps the users' keys: once a user signed in (as remembered in this browser, or as
+   * holding a document's key), setting up is only signing in again.
+   */
+  public setupKind(hints: { holdsDocKey?: boolean } = {}): KeySetupKind {
+    return (hints.holdsDocKey || this._options.signedInBefore?.()) ? "signInAgain" : "enable";
   }
 
   public openOnboarding(): Promise<boolean> {
@@ -195,8 +218,7 @@ export class OpenBaoKeyVault extends LocalCryptoKeyVault {
   public async getRegisteredUsers(vaultUserIds: string[]) {
     const ids = vaultUserIds.filter(isValidOpenBaoKeyName);
     if (ids.length === 0) { return new Set<string>(); }
-    const token = (await this._requireSession()).token;
-    const exists = await Promise.all(ids.map(id => this._keyExists(id, token)));
+    const exists = await this._withToken(token => Promise.all(ids.map(id => this._keyExists(id, token))));
     return new Set(ids.filter((_id, i) => exists[i]));
   }
 
@@ -235,8 +257,8 @@ export class OpenBaoKeyVault extends LocalCryptoKeyVault {
   }
 
   protected async wrapFor(rawKey: Uint8Array, recipients: KeyRecipient[]) {
-    const token = (await this._requireSession()).token;
-    const wraps = await Promise.all(recipients.filter(r => isValidOpenBaoKeyName(r.vaultUserId)).map(async (r) => {
+    const named = recipients.filter(r => isValidOpenBaoKeyName(r.vaultUserId));
+    const wraps = await this._withToken(token => Promise.all(named.map(async (r) => {
       try {
         const response = await this._client.request("POST", this._transitPath("encrypt", r.vaultUserId), {
           token, body: { plaintext: bytesToBase64(rawKey) },
@@ -255,15 +277,15 @@ export class OpenBaoKeyVault extends LocalCryptoKeyVault {
         }
         throw e;
       }
-    }));
+    })));
     return new Map(wraps.filter(w => w !== null));
   }
 
   protected async unwrap(myKey: WrappedKey): Promise<Uint8Array> {
     const name = this._ownName();
-    const response = await this._client.request("POST", this._transitPath("decrypt", name), {
-      token: (await this._requireSession()).token, body: { ciphertext: utf8Decode(myKey.wrappedKey) },
-    });
+    const response = await this._withToken(token => this._client.request("POST", this._transitPath("decrypt", name), {
+      token, body: { ciphertext: utf8Decode(myKey.wrappedKey) },
+    }));
     const rawKey = base64ToBytes(response?.data?.plaintext ?? "");
     if (rawKey.length !== 32) { throw new OpenBaoError("The key service returned no document key"); }
     return rawKey;
@@ -300,9 +322,9 @@ export class OpenBaoKeyVault extends LocalCryptoKeyVault {
   private async _ensureOwnKey() {
     // (Idempotent: OpenBao keeps an existing key as it is.)
     const name = this._ownName();
-    await this._client.request("POST", this._transitPath("keys", name), {
-      token: (await this._requireSession()).token, body: { type: KEY_TYPE },
-    });
+    await this._withToken(token => this._client.request("POST", this._transitPath("keys", name), {
+      token, body: { type: KEY_TYPE },
+    }));
   }
 
   private _transitPath(operation: "keys" | "encrypt" | "decrypt", vaultUserId: string) {
@@ -310,9 +332,10 @@ export class OpenBaoKeyVault extends LocalCryptoKeyVault {
   }
 
   /**
-   * The current session, if it's the user's and still valid, renewed when it nears its expiry (so
+   * The current session, if it's the user's and not expired, renewed when it nears its expiry (so
    * that a document left open keeps working). A session that has expired, can't be renewed or is
-   * someone else's (signed in to the identity provider as another user in the tab) is forgotten.
+   * someone else's (signed in to the identity provider as another user in the window) is
+   * forgotten. Whether it was revoked is only found out when using it (see _withToken()).
    */
   private async _freshSession(): Promise<OpenBaoSession | null> {
     const session = this._options.session();
@@ -326,15 +349,12 @@ export class OpenBaoKeyVault extends LocalCryptoKeyVault {
       this._options.forgetSession(session);
       return null;
     }
+    if (session.expiresAt === null || session.expiresAt - RENEW_BEFORE_MS > Date.now()) { return session; }
     try {
-      if (session.expiresAt !== null && session.expiresAt - RENEW_BEFORE_MS <= Date.now()) {
-        const result = await this._client.request("POST", "auth/token/renew-self", { token: session.token, body: {} });
-        const renewed = { ...session, expiresAt: expiryOf(result?.auth?.lease_duration) };
-        this._options.saveSession(renewed);
-        return renewed;
-      }
-      await this._client.request("GET", "auth/token/lookup-self", { token: session.token });
-      return session;
+      const result = await this._client.request("POST", "auth/token/renew-self", { token: session.token, body: {} });
+      const renewed = { ...session, expiresAt: expiryOf(result?.auth?.lease_duration) };
+      this._options.saveSession(renewed);
+      return renewed;
     } catch (e) {
       if (e instanceof OpenBaoError && e.status === 403) {
         this._options.forgetSession(session);
@@ -344,12 +364,33 @@ export class OpenBaoKeyVault extends LocalCryptoKeyVault {
     }
   }
 
-  private async _requireSession(): Promise<OpenBaoSession> {
+  /**
+   * Calls OpenBao with the user's token. When it refuses (403: also what it says of a token
+   * revoked, e.g. by signing out in another tab), whether the token is still valid is checked: if
+   * not, the sign-in is forgotten (NotSignedInToOpenBaoError), for the user to sign in again.
+   */
+  private async _withToken<T>(call: (token: string) => Promise<T>): Promise<T> {
     const session = await this._freshSession();
-    if (!session) {
-      throw new Error("Not signed in to the key service (or the sign-in expired): reload the page to sign in again");
+    if (!session) { throw new NotSignedInToOpenBaoError(); }
+    try {
+      return await call(session.token);
+    } catch (e) {
+      if (e instanceof OpenBaoError && e.status === 403 && !await this._isValid(session)) {
+        this._options.forgetSession(session);
+        throw new NotSignedInToOpenBaoError();
+      }
+      throw e;
     }
-    return session;
+  }
+
+  private async _isValid(session: OpenBaoSession) {
+    try {
+      await this._client.request("GET", "auth/token/lookup-self", { token: session.token });
+      return true;
+    } catch (e) {
+      if (e instanceof OpenBaoError && e.status === 403) { return false; }
+      throw e;
+    }
   }
 }
 

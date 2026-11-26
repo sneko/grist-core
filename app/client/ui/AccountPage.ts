@@ -347,14 +347,17 @@ function buildEncryptionContent(owner: MultiHolder, encryptionUserId: string | u
       dom.domComputed(encryption.status, status => [
         css.loginMethod(
           status === "enabled" ? t("Enabled") :
-            status === "disabled" ? t("Not enabled") :
-              status === "unavailable" ? t("The encryption service can't be reached") : "",
+            status === "signedOut" ? t("Enabled (signed out of the key service)") :
+              status === "disabled" ? t("Not enabled") :
+                status === "unavailable" ? t("The encryption service can't be reached") : "",
           testId("encryption-status"),
         ),
         (status === "enabled" && encryption.canManage()) ? css.textBtn(t("Manage"),
           dom.on("click", () => encryption.manage()), testId("encryption-manage")) : null,
         (status === "disabled" && encryption.canEnable()) ? css.textBtn(t("Enable encryption"),
           dom.on("click", () => encryption.enable()), testId("encryption-enable")) : null,
+        (status === "signedOut" && encryption.canEnable()) ? css.textBtn(t("Sign in"),
+          dom.on("click", () => encryption.enable()), testId("encryption-sign-in")) : null,
       ]),
     ),
     css.description(t("Needed to create end-to-end encrypted documents, and to read those shared with you.")),

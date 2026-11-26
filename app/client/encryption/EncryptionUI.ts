@@ -253,12 +253,16 @@ function editAudience(encryption: IDocEncryption, target: PrivacyTarget) {
  */
 export function watchAccountEncryption(owner: MultiHolder, encryptionUserId: string | undefined) {
   const config = getGristConfig().encryption;
-  const status = Observable.create<"loading" | "enabled" | "disabled" | "unavailable">(owner, "loading");
+  // ("signedOut": enabled, but the service, which keeps the user's keys, needs them to sign in again.)
+  const status = Observable.create<"loading" | "enabled" | "signedOut" | "disabled" | "unavailable">(owner,
+    "loading");
   let vault: IKeyVault | undefined;
   const refresh = async () => {
     vault = vault ?? await (await loadEncryption()).getKeyVault(config!, encryptionUserId ?? null);
     const enabled = await vault.hasKeys();
-    if (!owner.isDisposed()) { status.set(enabled ? "enabled" : "disabled"); }
+    if (!owner.isDisposed()) {
+      status.set(enabled ? "enabled" : vault.setupKind?.() === "signInAgain" ? "signedOut" : "disabled");
+    }
   };
   if (config) {
     refresh().catch((e) => {

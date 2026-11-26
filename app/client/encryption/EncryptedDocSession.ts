@@ -228,7 +228,7 @@ export class EncryptedDocSession extends Disposable implements IDocEncryption {
       const vault = await getKeyVault(config, openResult.user.vaultUserId);
       timings.step("load encryption service");
       while (!await vault.hasKeys()) {
-        await promptKeySetup(vault, cancellation);
+        await promptKeySetup(vault, cancellation, "open", { holdsDocKey: openResult.myKeys.length > 0 });
       }
       timings.step("check keys");
       const vaultIdFor = vaultIdOf;
@@ -1277,7 +1277,9 @@ export async function ensureVaultKeys(vault: IKeyVault, purpose: "open" | "encry
  * service's setup opens from it, and the dialog closes as soon as the setup is done.
  */
 function promptKeySetup(vault: IKeyVault, cancellation: Cancellation,
-  purpose: "open" | "encrypt" = "open"): Promise<void> {
+  purpose: "open" | "encrypt" = "open", hints: { holdsDocKey?: boolean } = {}): Promise<void> {
+  // (Asked each time: the user may have signed in, and out, meanwhile.)
+  const again = vault.setupKind?.(hints) === "signInAgain";
   return new Promise((resolve, reject) => {
     modal((ctl, owner) => {
       const busy = Observable.create(owner, false);
@@ -1297,13 +1299,18 @@ function promptKeySetup(vault: IKeyVault, cancellation: Cancellation,
         }
       };
       return [
-        cssModalTitle(t("Enable encryption")),
-        cssModalBody(purpose === "encrypt" ?
-          t("To encrypt a document, first enable encryption on your account.") :
-          t("This document is encrypted. You must enable encryption on your account to access it.")),
+        cssModalTitle(again ? t("Sign in to the key service") : t("Enable encryption")),
+        cssModalBody(
+          again ?
+            (purpose === "encrypt" ?
+              t("Encryption is enabled on your account: sign in to the key service again to encrypt this document.") :
+              t("Encryption is enabled on your account: sign in to the key service again to open this document.")) :
+            (purpose === "encrypt" ?
+              t("To encrypt a document, first enable encryption on your account.") :
+              t("This document is encrypted. You must enable encryption on your account to access it."))),
         cssModalButtons(
           vault.openOnboarding ?
-            bigPrimaryButton(t("Enable encryption"), dom.boolAttr("disabled", busy),
+            bigPrimaryButton(again ? t("Sign in") : t("Enable encryption"), dom.boolAttr("disabled", busy),
               dom.on("click", () => { setUp().catch(reportError); })) :
             // (Without the service's setup at hand: once done elsewhere, check again.)
             bigPrimaryButton(t("Check again"), dom.on("click", () => { ctl.close(); resolve(); })),

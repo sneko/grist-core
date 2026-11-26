@@ -18,8 +18,8 @@
  * (until a timeout), and the user can cancel from Grist's own dialog.
  */
 import {
-  forgetOpenBaoSessions, forgetSession, isSessionStorageKey, loadSession, saveSession, SessionStorage,
-  sessionStorageKey,
+  forgetOpenBaoSessions, forgetSession, isSessionStorageKey, loadSession, rememberSignedIn, saveSession,
+  SessionStorage, sessionStorageKey, signedInBefore,
 } from "app/client/encryption/providers/openbaoSessions";
 import {
   finishOpenBaoSignIn, isValidOpenBaoKeyName, OPENBAO_CALLBACK_CHANNEL, OPENBAO_CALLBACK_PATH, OpenBaoKeyVault,
@@ -117,6 +117,8 @@ export function createOpenBaoKeyVault(config: OpenBaoEncryptionProviderConfig, v
     session: () => inPageOnly ? current : loadSession(browser.storage, storageKey),
     saveSession: save,
     forgetSession: forget,
+    signedInBefore: () => signedInBefore(browser.storage, config.url, vaultUserId),
+    rememberSignedIn: () => rememberSignedIn(browser.storage, config.url, vaultUserId),
   });
 
   // An open document makes few calls to OpenBao: renew the sign-in when it nears its expiry all the

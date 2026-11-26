@@ -1,7 +1,9 @@
 /**
  * Where the "openbao" provider keeps sign-ins to OpenBao in the browser (localStorage, until they
  * expire, so that documents opened after a reload or in other tabs need no new sign-in), and how
- * they're forgotten when the user signs out of Grist or switches accounts.
+ * they're forgotten when the user signs out of Grist or switches accounts. Also remembers which
+ * users signed in before (only for the wording of the dialogs: "sign in again" rather than
+ * "enable encryption"), kept when they sign out, as the LaSuite service keeps a device's keys.
  *
  * Kept apart from the rest of the provider (and its dependencies) so that signing out of Grist
  * (./signOut.ts) can call forgetOpenBaoSessions() without loading the encryption code.
@@ -9,6 +11,7 @@
 import type { OpenBaoSession } from "app/common/encryption/OpenBaoKeyVault";
 
 const PREFIX = "grist-openbao-session:";
+const SIGNED_IN_BEFORE_PREFIX = "grist-openbao-signed-in:";
 
 export interface SessionStorage {
   readonly length?: number;
@@ -24,6 +27,23 @@ export function sessionStorageKey(openBaoUrl: string, vaultUserId: string) {
 
 export function isSessionStorageKey(key: string) {
   return key.startsWith(PREFIX);
+}
+
+/** Whether this user signed in to this OpenBao before, in this browser. */
+export function signedInBefore(storage: SessionStorage | null, openBaoUrl: string, vaultUserId: string) {
+  try {
+    return Boolean(storage?.getItem(SIGNED_IN_BEFORE_PREFIX + JSON.stringify([openBaoUrl, vaultUserId])));
+  } catch {
+    return false;
+  }
+}
+
+export function rememberSignedIn(storage: SessionStorage | null, openBaoUrl: string, vaultUserId: string) {
+  try {
+    storage?.setItem(SIGNED_IN_BEFORE_PREFIX + JSON.stringify([openBaoUrl, vaultUserId]), "1");
+  } catch {
+    // (Unavailable storage: only the wording of the dialogs differs.)
+  }
 }
 
 export function loadSession(storage: SessionStorage | null, key: string): OpenBaoSession | null {

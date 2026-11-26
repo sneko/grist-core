@@ -23,6 +23,8 @@ export interface KeyRecipient {
   name?: string;
 }
 
+export type KeySetupKind = "enable" | "signInAgain";
+
 export interface IKeyVault {
   /** Whether the current user has encryption keys available on this device. */
   hasKeys(): Promise<boolean>;
@@ -31,6 +33,13 @@ export interface IKeyVault {
   openOnboarding?(): Promise<boolean>;
   // Opens the service's settings of the user's encryption (keys, devices, backup).
   openSettings?(): void;
+  /**
+   * What setting up the user's keys means for them now, for the dialogs' wording: enabling
+   * encryption (the default), or only signing in to the service again (which keeps their keys).
+   * `holdsDocKey`: the user holds a copy of the key of the document being opened, so enabled
+   * encryption already (if not in this browser).
+   */
+  setupKind?(hints?: { holdsDocKey?: boolean }): KeySetupKind;
   /** Which of these users have registered encryption keys (and so can receive a document key). */
   getRegisteredUsers(vaultUserIds: string[]): Promise<Set<string>>;
   /** Mints a new document key, wrapped for each recipient. Returns wraps keyed by vaultUserId. */

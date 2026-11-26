@@ -246,6 +246,41 @@ describe("encryption/providers/openbao", function() {
       }
     });
 
+    it("only asks OpenBao whether its token is still valid when it's refused", async function() {
+      const { vault, kept } = makeVault(signedIn());
+      let tokenValid = true;
+      const myKey = { wrappedKey: utf8Encode("vault:v1:x"), keyVersion: 1 };
+      const stub = routeFetch((request) => {
+        if (request.startsWith("POST transit/decrypt/")) {
+          return [403, { errors: ["permission denied"] }];
+        }
+        if (request === "GET auth/token/lookup-self") { return tokenValid ? [200] : [403]; }
+        return [200];
+      });
+      try {
+        // Refused, with a valid token (e.g. a policy not matching the settings): that refusal.
+        await assert.isRejected(vault.decrypt(new Uint8Array(40), myKey), /refused \(403\)/);
+        assert.deepEqual(stub.requests, ["POST transit/decrypt/grist-user-alice", "GET auth/token/lookup-self"]);
+        assert.isNotNull(kept.session);
+        // Refused, the token being revoked (e.g. by signing out in another tab): forgotten, to sign in again.
+        tokenValid = false;
+        await assert.isRejected(vault.decrypt(new Uint8Array(40), myKey), /Not signed in to the key service/);
+        assert.isNull(kept.session);
+        assert.isFalse(await vault.hasKeys());
+      } finally {
+        stub.restore();
+      }
+      // Accepted: OpenBao isn't asked about the token at all.
+      const fresh = makeVault(signedIn());
+      const ok = routeFetch(() => [200]);
+      try {
+        assert.isTrue(await fresh.vault.hasKeys());
+        assert.deepEqual(ok.requests, ["POST transit/keys/grist-user-alice"]);
+      } finally {
+        ok.restore();
+      }
+    });
+
     it("refuses what isn't a document key, or OpenBao's ciphertext", async function() {
       const { vault } = makeVault(signedIn());
       const stub = routeFetch((request) => {
@@ -394,6 +429,29 @@ describe("encryption/providers/openbao", function() {
       assert.equal(loadSession(storage, aliceKey)?.token, "t2");
       forgetSession(storage, aliceKey, { token: "t2", expiresAt: LATER(), subject: "alice" });
       assert.isNull(storage.getItem(aliceKey));
+    });
+
+    it("asks users who signed in before to sign in again, rather than to enable encryption", async function() {
+      const browser = testBrowser();
+      const vault = await createOpenBaoKeyVault(config, "alice", browser);
+      // Never signed in here: enabling encryption, unless they hold a document's key already.
+      assert.equal(vault.setupKind(), "enable");
+      assert.equal(vault.setupKind({ holdsDocKey: true }), "signInAgain");
+      // Signed in once, then signed out of Grist (or the token was revoked): signing in again.
+      browser.storage!.setItem(aliceKey, JSON.stringify({ token: "t1", expiresAt: LATER(), subject: "alice" }));
+      const stub = stubFetch({}, {});
+      try {
+        assert.isTrue(await vault.hasKeys());
+        forgetOpenBaoSessions(browser.storage, {});
+      } finally {
+        stub.restore();
+      }
+      assert.isNull(browser.storage!.getItem(aliceKey));
+      assert.equal(vault.setupKind(), "signInAgain");
+      // Only for that user, and that OpenBao.
+      assert.equal((await createOpenBaoKeyVault(config, "bob", browser)).setupKind(), "enable");
+      assert.equal((await createOpenBaoKeyVault({ ...config, url: "https://other.example.com" }, "alice", browser))
+        .setupKind(), "enable");
     });
 
     it("forgets (and revokes) sign-ins other users left in the browser", async function() {
