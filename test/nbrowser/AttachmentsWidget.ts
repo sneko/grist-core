@@ -245,7 +245,7 @@ describe("AttachmentsWidget", function() {
   });
 
   it("should allow editing the attachments list", async function() {
-    let cell = gu.getCell(0, 2);
+    const cell = gu.getCell(0, 2);
     assert.deepEqual(await getCellThumbnailTitles(cell), [
       "sample.pdf",
       "grist.png",
@@ -292,11 +292,12 @@ describe("AttachmentsWidget", function() {
     await gu.waitForServer();
     assert.equal(await driver.find(".test-pw-counter").getText(), "2 of 2");
     await driver.find(".test-modal-dialog .test-pw-close").click();
-    cell = gu.getCell(0, 2);
-    assert.deepEqual(await getCellThumbnailTitles(cell), [
+    // Closing saves the cell, which then gets rendered again: wait for it.
+    await gu.waitForServer();
+    await gu.waitToPass(async () => assert.deepEqual(await getCellThumbnailTitles(gu.getCell(0, 2)), [
       "renamed.pdf",
       "grist.png",
-    ]);
+    ]));
   });
 
   it("should allow uploading to the add row", async function() {
@@ -725,9 +726,12 @@ describe("AttachmentsWidget", function() {
     await gu.sendKeys(Key.ESCAPE);
     await gu.waitAppFocus();
 
-    // Now the same with any key
-    await gu.sendKeys("hello");
-    await gu.checkFormulaEditor("hello");
+    // Now the same with any key. (The editor gets the key that opened it; wait for it to be open
+    // before typing more, as keys typed while it opens may get lost.)
+    await gu.sendKeys("h");
+    await gu.waitToPass(() => gu.checkFormulaEditor("h"));
+    await gu.sendKeys("ello");
+    await gu.waitToPass(() => gu.checkFormulaEditor("hello"));
     await gu.sendKeys(Key.ESCAPE);
     await gu.waitAppFocus();
 
