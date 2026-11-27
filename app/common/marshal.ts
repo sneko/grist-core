@@ -461,7 +461,12 @@ export class Unmarshaller extends EventEmitter {
         if (key instanceof Uint8Array) {
           key = MemBuffer.arrayToString(key);
         }
-        dict[key as string] = value;
+        if (key === "__proto__") {
+          // Assigning would replace the object's prototype rather than set the key.
+          Object.defineProperty(dict, key, { value, enumerable: true, writable: true, configurable: true });
+        } else {
+          dict[key as string] = value;
+        }
       }
     }
     return dict;

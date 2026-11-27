@@ -149,6 +149,20 @@ describe("marshal", function() {
     });
   });
 
+  describe("dict keys", function() {
+    it("should keep a __proto__ key as a key, not as the prototype", function() {
+      // JSON.parse makes "__proto__" an own key, as a dict from Python may have.
+      var value = JSON.parse('{"__proto__": {"polluted": true}, "a": 1}');
+      var result = marshal.loadBase64(marshal.dumpBase64(value, { stringToBuffer: false }),
+        { bufferToString: true });
+      assert.strictEqual(Object.getPrototypeOf(result), Object.prototype);
+      assert.isUndefined(result.polluted);
+      assert.deepEqual(Object.keys(result).sort(), ["__proto__", "a"]);
+      assert.deepEqual(result["__proto__"], { polluted: true });
+      assert.strictEqual(result.a, 1);
+    });
+  });
+
   describe("longs", function() {
     // This is generated as [991**i for i in xrange(10)] + [-678**i for i in xrange(10)].
     // Note how overly large values currently get stringified.
