@@ -110,15 +110,23 @@ BaseRowModel.prototype._process_BulkUpdateRecord = function(action, tableId, row
 // TODO: if AddColumn messages aren't sent for properties, we will need to find a different
 // way to create and set the properties than here
 BaseRowModel.prototype._process_AddColumn = function(action, tableId, colId, colInfo) {
-  this._fields.push(colId);
-  this._createField(colId);
+  // A row model created while a bundle of actions is being applied starts with the table's
+  // columns as of after the bundle, and may then receive the bundle's actions too: then the
+  // column exists already.
+  if (this._fields.indexOf(colId) === -1) {
+    this._fields.push(colId);
+    this._createField(colId);
+  }
   this._assignColumn(colId);
 };
 
 BaseRowModel.prototype._process_RenameColumn = function(action, tableId, oldColId, newColId) {
   // handle standard renames differently
   if (this._fields.indexOf(newColId) !== -1) {
-    console.error("RowModel #RenameColumn %s %s %s: already exists", tableId, oldColId, newColId);
+    // Already renamed (see _process_AddColumn): only forget the old name, if still around.
+    if (oldColId !== newColId && gutil.arrayRemove(this._fields, oldColId)) {
+      delete this[oldColId];
+    }
     return;
   }
   var index = this._fields.indexOf(oldColId);
