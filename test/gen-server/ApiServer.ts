@@ -2929,6 +2929,26 @@ describe("ApiServer", function() {
     assert.equal(resp.status, 404);
   });
 
+  it("links the subject of an OIDC login to the user", async function() {
+    // Sessions from OIDC logins have no loginMethod, and the OIDC subject as authSubject.
+    async function getSubjectAfterLogin(email: string, sessionProps: object) {
+      const session = server.newSession();
+      const config = await session.getCookieLogin("nasa", { email, name: "Someone" }, { sessionProps });
+      const resp = await axios.get(`${homeUrl}/api/session/access/active`, config);
+      assert.equal(resp.status, 200);
+      assert.equal(resp.data.user.email, email);
+      return (await dbManager.getExistingUserByLogin(email))?.options?.authSubject;
+    }
+
+    assert.equal(await getSubjectAfterLogin("oidc-user@example.com", { authSubject: "subject-1" }), "subject-1");
+    // A subject already linked stays.
+    assert.equal(await getSubjectAfterLogin("oidc-user@example.com", { authSubject: "subject-2" }), "subject-1");
+    // Other login methods don't link the session's subject.
+    assert.isUndefined(await getSubjectAfterLogin("google-user@example.com",
+      { authSubject: "subject-3", profile: { email: "google-user@example.com", name: "Someone",
+        loginMethod: "Google" } }));
+  });
+
   // Please keep this as the last test. Could go in after(), but
   // then it is a little harder to tell in logs if it wasn't skipped.
   describe("Prepared Statements", async function() {

@@ -477,9 +477,10 @@ async function getExpressSessionProfile(
 
   const profile = sessionUser?.profile ?? null;
   const userOptions: UserOptions = {};
-  if (profile?.loginMethod === "Email + Password") {
+  if (profile?.loginMethod === "Email + Password" || (profile && !profile.loginMethod && sessionUser?.authSubject)) {
     // Link the session authSubject, if present, to the user. This has no effect
-    // if the user already has an authSubject set in the db.
+    // if the user already has an authSubject set in the db. (Sessions from OIDC logins have
+    // no loginMethod, and the OIDC subject as authSubject.)
     userOptions.authSubject = sessionUser?.authSubject;
   }
   return { profile, userOptions, customHostSession };

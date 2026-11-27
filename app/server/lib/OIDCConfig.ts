@@ -352,6 +352,10 @@ export class OIDCBuilder {
       const scopedSession = sessions.getOrCreateSessionFromRequest(req);
       await scopedSession.operateOnScopedSession(req, async user => Object.assign(user, {
         profile,
+        // The identity provider's identifier for the user, linked to the user on their first login
+        // (see Authorizer): services sharing the identity provider know users by it (e.g. the
+        // encryption service used for encrypted documents).
+        ...(userInfo.sub ? { authSubject: String(userInfo.sub) } : {}),
       }));
 
       // We clear the previous session info, like the states, nonce or the code verifier, which

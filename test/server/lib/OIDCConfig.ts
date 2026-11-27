@@ -628,6 +628,15 @@ describe("OIDCConfig", () => {
         }),
       },
       {
+        itMsg: "should keep the user's subject, to link it to the user",
+        session: DEFAULT_SESSION,
+        userInfo: { ...FAKE_USER_INFO, sub: "fake-subject" },
+        extraChecks: ({ user }: { user: any }) => {
+          assert.equal(user.authSubject, "fake-subject");
+          assert.deepEqual(user.profile, { email: "fake-email", name: "fake-name", extra: {} });
+        },
+      },
+      {
         itMsg: "should fill user profile with name constructed using " +
           "given_name and family_name when GRIST_OIDC_SP_PROFILE_NAME_ATTR is not set",
         session: DEFAULT_SESSION,
